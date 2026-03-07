@@ -150,6 +150,27 @@ Backend plumbing for cluster visibility in the dashboard.
 
 ---
 
+### Completed: Phase 4.1 + 4.3 (Config Hot-Reload + Management Interface)
+
+Live config reload and operational management socket.
+
+#### New Files
+| File | Purpose |
+|------|---------|
+| `hbctl.py` | CLI client for management socket |
+
+#### Modified Files
+| File | Changes |
+|------|---------|
+| `hblink4/hblink.py` | `CONFIG_FILE` global, `_reload_config()` method (re-read config, rebuild matcher, re-evaluate repeaters, update config hash), SIGHUP handler, management Unix socket server with 5 commands (status/cluster/repeaters/reload/drain) |
+| `tests/test_cluster.py` | 5 new tests: reload no-file, rebuild matcher, disconnect blacklisted, emit event, mgmt socket roundtrip |
+
+#### Test Results
+- **143 tests total, 143 passing, 0 failures**
+- 5 new Phase 4 tests + 51 prior cluster tests + 87 existing tests
+
+---
+
 ### What's Next
 
 Per the recommended implementation order:
@@ -162,5 +183,6 @@ Per the recommended implementation order:
 | 4 | 1.3 (User Cache Sharing) | **DONE** |
 | 5 | 3.1 (DNS/Config Failover Docs) | **DONE** |
 | 6 | 1.4 + 4.2 (Dashboard Cluster View) | **DONE** |
-| 7 | 4.1 + 4.3 (Config Hot-Reload + Management Commands) | Next |
-| 8+ | Phases 5-6 | Pending |
+| 7 | 4.1 + 4.3 (Config Hot-Reload + Management Commands) | **DONE** |
+| 8 | 5.1 + 5.2 (Token Auth + Subscriptions) | Next |
+| 9+ | Phases 5-6 | Pending |

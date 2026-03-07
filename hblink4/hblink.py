@@ -26,6 +26,7 @@ import asyncio
 
 # Global configuration dictionary
 CONFIG: Dict[str, Any] = {}
+CONFIG_FILE: Optional[str] = None  # Set by main() for SIGHUP reload
 LOGGER = logging.getLogger(__name__)
 
 import os
@@ -102,6 +103,7 @@ class HBProtocol(asyncio.DatagramProtocol):
         self._outbound_ids: Set[int] = set()  # reserved IDs to prevent DoS
         
         self._config = CONFIG
+        self._config_file = CONFIG_FILE
         self._matcher = RepeaterMatcher(CONFIG)
         self._timeout_task = None
         self._stream_timeout_task = None
@@ -955,6 +957,100 @@ class HBProtocol(asyncio.DatagramProtocol):
         if hasattr(self, '_events') and self._events:
             self._events.close()
             
+    # ========== CONFIG HOT-RELOAD (Phase 4.1) ==========
+
+    def _reload_config(self) -> bool:
+        """Reload config from disk. Called on SIGHUP.
+
+        Reloads: repeater_configurations, blacklist, connection_type_detection.
+        Re-evaluates connected repeaters: disconnect blacklisted, update TG lists.
+        Returns True on success.
+        """
+        if not self._config_file:
+            LOGGER.warning('Config reload requested but no config file path set')
+            return False
+
+        try:
+            new_config = load_config_func(self._config_file, LOGGER)
+        except SystemExit:
+            LOGGER.error('Config reload failed — keeping current config')
+            return False
+
+        old_config = self._config
+
+        # Update routing-relevant sections in the live CONFIG dict
+        for key in ('repeater_configurations', 'blacklist', 'connection_type_detection'):
+            if key in new_config:
+                CONFIG[key] = new_config[key]
+
+        # Rebuild matcher with new patterns
+        self._matcher = RepeaterMatcher(CONFIG)
+        LOGGER.info('Config reloaded — matcher rebuilt')
+
+        # Re-evaluate connected repeaters
+        disconnected = 0
+        updated = 0
+        for repeater_id in list(self._repeaters.keys()):
+            repeater = self._repeaters.get(repeater_id)
+            if not repeater or repeater.connection_state != 'connected':
+                continue
+
+            rid_int = rid_to_int(repeater_id)
+            callsign = repeater.get_callsign_str()
+
+            # Check blacklist
+            try:
+                self._matcher._check_blacklist(rid_int, callsign)
+            except Exception:
+                LOGGER.warning(f'Repeater {rid_int} ({callsign}) now blacklisted — disconnecting')
+                if self._port:
+                    try:
+                        self._port.sendto(MSTCL, repeater.sockaddr)
+                    except Exception:
+                        pass
+                self._remove_repeater(repeater_id, 'blacklisted_on_reload')
+                disconnected += 1
+                continue
+
+            # Check if still has a valid config
+            repeater_config = self._matcher.get_repeater_config(rid_int, callsign)
+            if repeater_config is None:
+                LOGGER.warning(f'Repeater {rid_int} ({callsign}) no longer matches any pattern — disconnecting')
+                if self._port:
+                    try:
+                        self._port.sendto(MSTCL, repeater.sockaddr)
+                    except Exception:
+                        pass
+                self._remove_repeater(repeater_id, 'no_config_on_reload')
+                disconnected += 1
+                continue
+
+            # Update TG lists
+            self._load_repeater_tg_config(repeater_id, repeater)
+            updated += 1
+
+        # Update cluster config hash
+        if self._cluster_bus:
+            import hashlib as _hashlib
+            hash_input = json.dumps({
+                'repeater_configurations': CONFIG.get('repeater_configurations', {}),
+                'blacklist': CONFIG.get('blacklist', {}),
+                'connection_type_detection': CONFIG.get('connection_type_detection', {}),
+            }, sort_keys=True).encode('utf-8')
+            config_hash = _hashlib.sha256(hash_input).hexdigest()[:16]
+            self._cluster_bus.set_config_hash(config_hash)
+
+        LOGGER.info(f'Config reload complete: {updated} repeater(s) updated, {disconnected} disconnected')
+
+        # Notify dashboard
+        self._events.emit('config_reloaded', {
+            'repeaters_updated': updated,
+            'repeaters_disconnected': disconnected,
+        })
+        self._emit_cluster_state()
+
+        return True
+
     # ========== CLUSTER BUS METHODS ==========
 
     async def _start_cluster_bus(self):
@@ -3084,8 +3180,9 @@ class HBProtocol(asyncio.DatagramProtocol):
 
 def load_config(config_file: str):
     """Wrapper for config module load_config - maintains global CONFIG"""
-    global CONFIG
+    global CONFIG, CONFIG_FILE
     CONFIG = load_config_func(config_file, LOGGER)
+    CONFIG_FILE = config_file
 
 def parse_outbound_connections() -> List[OutboundConnectionConfig]:
     """Wrapper for config module parse_outbound_connections"""
@@ -3192,6 +3289,111 @@ async def async_main():
                 )
                 LOGGER.info(f'✓ Started outbound connection task for "{config.name}"')
     
+    # ===== Management Socket (Phase 4.3) =====
+    mgmt_socket_path = CONFIG.get('global', {}).get('management_socket', '/tmp/hblink4_mgmt.sock')
+
+    async def handle_mgmt_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """Handle a management socket client connection."""
+        try:
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
+                try:
+                    cmd = json.loads(line.decode().strip())
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    cmd = {'command': line.decode().strip()}
+
+                response = _handle_mgmt_command(cmd, protocols)
+                writer.write(json.dumps(response, separators=(',', ':')).encode() + b'\n')
+                await writer.drain()
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+        finally:
+            writer.close()
+
+    def _handle_mgmt_command(cmd: dict, protos: list) -> dict:
+        """Process a management command and return response dict."""
+        command = cmd.get('command', '').strip().lower()
+        proto = protos[0] if protos else None
+
+        if command == 'status':
+            return {
+                'ok': True,
+                'node_id': proto._cluster_bus._node_id if proto and proto._cluster_bus else None,
+                'repeaters': len([r for r in proto._repeaters.values()
+                                  if r.connection_state == 'connected']) if proto else 0,
+                'outbounds': len(proto._outbounds) if proto else 0,
+                'draining': proto._draining if proto else False,
+                'cluster_peers': len(proto._cluster_bus.connected_peers) if proto and proto._cluster_bus else 0,
+            }
+
+        elif command == 'cluster':
+            if not proto or not proto._cluster_bus:
+                return {'ok': True, 'enabled': False}
+            peer_states = proto._cluster_bus.get_peer_states()
+            peers = []
+            for nid, ps in peer_states.items():
+                rc = len(proto._cluster_state.get(nid, {}))
+                peers.append({
+                    'node_id': nid, 'connected': ps['connected'],
+                    'alive': ps['alive'], 'latency_ms': ps['latency_ms'],
+                    'config_hash': ps.get('config_hash', ''),
+                    'repeater_count': rc,
+                    'draining': nid in proto._draining_peers,
+                })
+            return {'ok': True, 'enabled': True,
+                    'local_node_id': proto._cluster_bus._node_id, 'peers': peers}
+
+        elif command == 'repeaters':
+            result = []
+            if proto:
+                for rid, rpt in proto._repeaters.items():
+                    if rpt.connection_state != 'connected':
+                        continue
+                    result.append({
+                        'repeater_id': rid_to_int(rid),
+                        'callsign': rpt.get_callsign_str(),
+                        'connection_type': rpt.connection_type,
+                        'node': 'local',
+                    })
+                for nid, rpts in proto._cluster_state.items():
+                    for rid_int, info in rpts.items():
+                        result.append({
+                            'repeater_id': rid_int,
+                            'callsign': info.get('callsign', ''),
+                            'connection_type': info.get('connection_type', ''),
+                            'node': nid,
+                        })
+            return {'ok': True, 'repeaters': result, 'count': len(result)}
+
+        elif command == 'reload':
+            if proto:
+                ok = proto._reload_config()
+                return {'ok': ok}
+            return {'ok': False, 'error': 'no protocol'}
+
+        elif command == 'drain':
+            if proto:
+                asyncio.ensure_future(proto.graceful_shutdown())
+                return {'ok': True, 'message': 'drain initiated'}
+            return {'ok': False, 'error': 'no protocol'}
+
+        else:
+            return {'ok': False, 'error': f'unknown command: {command}',
+                    'commands': ['status', 'cluster', 'repeaters', 'reload', 'drain']}
+
+    mgmt_server = None
+    try:
+        # Remove stale socket
+        if os.path.exists(mgmt_socket_path):
+            os.unlink(mgmt_socket_path)
+        mgmt_server = await asyncio.start_unix_server(handle_mgmt_client, mgmt_socket_path)
+        os.chmod(mgmt_socket_path, 0o660)
+        LOGGER.info(f'✓ Management socket at {mgmt_socket_path}')
+    except Exception as e:
+        LOGGER.warning(f'Management socket failed: {e} (non-fatal)')
+
     # Setup signal handlers (Linux/Unix native asyncio pattern)
     shutdown_event = asyncio.Event()
     
@@ -3207,13 +3409,30 @@ async def async_main():
     
     loop.add_signal_handler(signal.SIGINT, lambda: handle_shutdown(signal.SIGINT))
     loop.add_signal_handler(signal.SIGTERM, lambda: handle_shutdown(signal.SIGTERM))
+
+    # SIGHUP = config hot-reload (Phase 4.1)
+    def handle_sighup():
+        LOGGER.info('Received SIGHUP — reloading configuration')
+        for protocol in protocols:
+            protocol._config_file = CONFIG_FILE
+            protocol._reload_config()
+
+    loop.add_signal_handler(signal.SIGHUP, handle_sighup)
     
     # Run until shutdown signal received
     try:
         await shutdown_event.wait()
     except asyncio.CancelledError:
         pass
-    
+
+    # Cleanup management socket
+    if mgmt_server:
+        mgmt_server.close()
+        try:
+            os.unlink(mgmt_socket_path)
+        except OSError:
+            pass
+
     LOGGER.info("Shutdown complete")
 
 def main():

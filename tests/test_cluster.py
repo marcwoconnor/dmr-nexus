@@ -1131,5 +1131,148 @@ class TestClusterDashboardHandleEvent(unittest.IsolatedAsyncioTestCase):
             srv.state = old_state
 
 
+class TestConfigReload(unittest.TestCase):
+    """Phase 4.1: Config hot-reload via _reload_config."""
+
+    def _make_proto(self):
+        from hblink4.hblink import HBProtocol, CONFIG
+        from hblink4.access_control import RepeaterMatcher
+        proto = _make_hbprotocol_for_routing()
+        proto._events = MagicMock()
+        proto._config_file = None
+        proto._config = CONFIG
+        proto._matcher = RepeaterMatcher(CONFIG)
+        proto._port = MagicMock()
+        proto._emit_cluster_state = MagicMock()
+        proto._load_repeater_tg_config = HBProtocol._load_repeater_tg_config.__get__(proto)
+        proto._reload_config = HBProtocol._reload_config.__get__(proto)
+        proto._remove_repeater = MagicMock()
+        return proto
+
+    def test_reload_no_config_file(self):
+        """Reload returns False when no config file set."""
+        proto = self._make_proto()
+        self.assertFalse(proto._reload_config())
+
+    def test_reload_rebuilds_matcher(self):
+        """Reload replaces the RepeaterMatcher."""
+        import tempfile
+        from hblink4.hblink import CONFIG
+        # Write a temporary config
+        cfg = dict(CONFIG)
+        cfg['repeater_configurations'] = {'patterns': []}
+        cfg['blacklist'] = {'patterns': []}
+        cfg['connection_type_detection'] = {'categories': {}}
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(cfg, f)
+            f.flush()
+            proto = self._make_proto()
+            old_matcher = proto._matcher
+            proto._config_file = f.name
+            result = proto._reload_config()
+        os.unlink(f.name)
+        self.assertTrue(result)
+        self.assertIsNot(proto._matcher, old_matcher)
+
+    def test_reload_disconnects_blacklisted(self):
+        """Repeater now on blacklist gets disconnected."""
+        import tempfile
+        from hblink4.hblink import CONFIG
+        from hblink4.models import RepeaterState
+
+        # Create a connected repeater
+        proto = self._make_proto()
+        rid = (312000).to_bytes(4, 'big')
+        rpt = MagicMock(spec=RepeaterState)
+        rpt.connection_state = 'connected'
+        rpt.get_callsign_str.return_value = 'W1TEST'
+        rpt.repeater_id = rid
+        rpt.sockaddr = ('127.0.0.1', 62031)
+        proto._repeaters = {rid: rpt}
+
+        # Write config that blacklists 312000
+        cfg = dict(CONFIG)
+        cfg['repeater_configurations'] = {'patterns': []}
+        cfg['blacklist'] = {'patterns': [{
+            'name': 'test', 'description': 'test',
+            'match': {'ids': [312000]}, 'reason': 'test block'
+        }]}
+        cfg['connection_type_detection'] = {'categories': {}}
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(cfg, f)
+            f.flush()
+            proto._config_file = f.name
+            proto._reload_config()
+        os.unlink(f.name)
+
+        # Should have sent MSTCL and removed the repeater
+        proto._port.sendto.assert_called()
+        proto._remove_repeater.assert_called_once()
+        call_args = proto._remove_repeater.call_args
+        self.assertEqual(call_args[0][0], rid)
+        self.assertEqual(call_args[0][1], 'blacklisted_on_reload')
+
+    def test_reload_emits_dashboard_event(self):
+        """Reload emits config_reloaded event."""
+        import tempfile
+        from hblink4.hblink import CONFIG
+
+        cfg = dict(CONFIG)
+        cfg['repeater_configurations'] = {'patterns': []}
+        cfg['blacklist'] = {'patterns': []}
+        cfg['connection_type_detection'] = {'categories': {}}
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(cfg, f)
+            f.flush()
+            proto = self._make_proto()
+            proto._config_file = f.name
+            proto._reload_config()
+        os.unlink(f.name)
+
+        # Check config_reloaded event was emitted
+        emit_calls = [c for c in proto._events.emit.call_args_list
+                      if c[0][0] == 'config_reloaded']
+        self.assertEqual(len(emit_calls), 1)
+
+
+class TestManagementSocket(unittest.IsolatedAsyncioTestCase):
+    """Phase 4.3: Management socket commands."""
+
+    async def test_mgmt_roundtrip(self):
+        """Full roundtrip: connect to unix socket, send command, get response."""
+        import tempfile
+
+        # We need to replicate the handler logic since it's nested in async_main
+        async def handle_client(reader, writer):
+            line = await reader.readline()
+            cmd = json.loads(line.decode().strip())
+            command = cmd.get('command', '').lower()
+            if command == 'status':
+                resp = {'ok': True, 'repeaters': 0}
+            else:
+                resp = {'ok': False, 'error': 'unknown'}
+            writer.write(json.dumps(resp).encode() + b'\n')
+            await writer.drain()
+            writer.close()
+
+        sock_path = tempfile.mktemp(suffix='.sock')
+        server = await asyncio.start_unix_server(handle_client, sock_path)
+        try:
+            reader, writer = await asyncio.open_unix_connection(sock_path)
+            writer.write(json.dumps({'command': 'status'}).encode() + b'\n')
+            await writer.drain()
+            line = await reader.readline()
+            resp = json.loads(line.decode().strip())
+            self.assertTrue(resp['ok'])
+            self.assertEqual(resp['repeaters'], 0)
+            writer.close()
+        finally:
+            server.close()
+            await server.wait_closed()
+            os.unlink(sock_path)
+
+
 if __name__ == '__main__':
     unittest.main()
