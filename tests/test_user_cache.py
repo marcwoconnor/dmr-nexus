@@ -189,5 +189,26 @@ def test_user_cache_clear():
     assert len(cache._cache) == 0
 
 
+def test_user_entry_region_id():
+    """Phase 6.4: UserEntry tracks region_id."""
+    cache = UserCache(timeout_seconds=600)
+    cache.update(3106000, 312345, "N0MJS", 2, 3100)
+    entry = cache.lookup(3106000)
+    assert entry.region_id is None  # Local entry
+
+    # Manually set region_id
+    entry.region_id = 'us-west'
+    d = entry.to_dict()
+    assert d['region_id'] == 'us-west'
+
+
+def test_user_entry_region_id_not_in_dict_when_none():
+    """region_id excluded from to_dict when None."""
+    cache = UserCache(timeout_seconds=600)
+    cache.update(3106000, 312345, "N0MJS", 2, 3100)
+    d = cache.lookup(3106000).to_dict()
+    assert 'region_id' not in d
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

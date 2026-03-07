@@ -18,6 +18,8 @@ from hblink4.cluster import (
 )
 from hblink4.models import StreamState, RepeaterState
 from hblink4.subscriptions import SubscriptionStore
+from hblink4.user_cache import UserCache
+from hblink4.backbone import UserLookupService
 
 
 class TestPeerState(unittest.TestCase):
@@ -283,6 +285,8 @@ def _make_hbprotocol_for_routing():
     mock._subscriptions = SubscriptionStore()
     mock._backbone_bus = None
     mock._region_id = 'default'
+    mock._user_cache = None
+    mock._user_lookup_service = None
 
     # Bind real methods
     mock._calculate_stream_targets = HBProtocol._calculate_stream_targets.__get__(mock)
@@ -293,6 +297,7 @@ def _make_hbprotocol_for_routing():
     mock._handle_virtual_stream_end = HBProtocol._handle_virtual_stream_end.__get__(mock)
     mock._is_dmr_terminator = HBProtocol._is_dmr_terminator.__get__(mock)
     mock._is_stream_active_locally = HBProtocol._is_stream_active_locally.__get__(mock)
+    mock._private_call_local_targets = HBProtocol._private_call_local_targets.__get__(mock)
 
     return mock
 
@@ -1869,6 +1874,225 @@ class TestMultiConnectDedup(unittest.TestCase):
             del self.proto._virtual_streams[k]
 
         self.assertEqual(len(self.proto._virtual_streams), 0)
+
+
+# ========== Private Call Routing Tests (Phase 6.4) ==========
+
+
+def _make_hbprotocol_for_private_call():
+    """Create HBProtocol mock for testing private call routing in _handle_stream_start."""
+    from hblink4.hblink import HBProtocol, CONFIG
+
+    CONFIG.clear()
+    CONFIG.update({
+        'global': {
+            'bind_address': '0.0.0.0', 'port': 62030,
+            'passphrase': 'test', 'max_missed_pings': 3,
+            'ping_time': 5, 'stream_timeout': 2.0,
+            'stream_hang_time': 10.0, 'user_cache_timeout': 300,
+        },
+        'repeater_configurations': {'patterns': []},
+        'blacklist': {'patterns': []},
+        'connection_type_detection': {'categories': {}},
+    })
+
+    mock = MagicMock(spec=HBProtocol)
+    mock._repeaters = {}
+    mock._outbounds = {}
+    mock._cluster_bus = MagicMock()
+    mock._cluster_bus.is_peer_alive = MagicMock(return_value=True)
+    mock._cluster_bus.connected_peers = []
+    mock._cluster_state = {}
+    mock._virtual_streams = {}
+    mock._draining_peers = set()
+    mock._native_clients = {}
+    mock._subscriptions = SubscriptionStore()
+    mock._backbone_bus = None
+    mock._region_id = 'default'
+    mock._user_cache = UserCache(timeout_seconds=600)
+    mock._user_lookup_service = None
+    mock._denied_streams = {}
+
+    # Bind real methods needed for _handle_stream_start
+    mock._handle_stream_start = HBProtocol._handle_stream_start.__get__(mock)
+    mock._calculate_stream_targets = HBProtocol._calculate_stream_targets.__get__(mock)
+    mock._check_outbound_routing = HBProtocol._check_outbound_routing.__get__(mock)
+    mock._check_inbound_routing = MagicMock(return_value=True)
+    mock._is_slot_busy = HBProtocol._is_slot_busy.__get__(mock)
+    mock._is_stream_active_locally = HBProtocol._is_stream_active_locally.__get__(mock)
+    mock._is_dmr_terminator = HBProtocol._is_dmr_terminator.__get__(mock)
+    mock._private_call_local_targets = HBProtocol._private_call_local_targets.__get__(mock)
+    mock._emit_stream_start = MagicMock()
+
+    return mock
+
+
+class TestPrivateCallRouting(unittest.TestCase):
+    """Phase 6.4: Private call routing via user cache."""
+
+    # Radio ID 3120001 as 3-byte big-endian
+    DST_RADIO_ID = 3120001
+    DST_BYTES = DST_RADIO_ID.to_bytes(3, 'big')  # b'\x2f\x9b\x81'
+    # Repeater IDs
+    TARGET_RPT_ID = 312500
+    TARGET_RPT_BYTES = TARGET_RPT_ID.to_bytes(4, 'big')
+    SRC_RPT_ID = 312501
+    SRC_RPT_BYTES = SRC_RPT_ID.to_bytes(4, 'big')
+
+    def setUp(self):
+        self.proto = _make_hbprotocol_for_private_call()
+        # Create a target repeater
+        target_rpt = MagicMock(spec=RepeaterState)
+        target_rpt.repeater_id = self.TARGET_RPT_BYTES
+        target_rpt.connection_state = 'connected'
+        target_rpt.get_slot_stream = MagicMock(return_value=None)
+        target_rpt.set_slot_stream = MagicMock()
+        target_rpt.slot1_talkgroups = None
+        target_rpt.slot2_talkgroups = None
+        self.proto._repeaters[self.TARGET_RPT_BYTES] = target_rpt
+
+        # Create source repeater
+        src_rpt = MagicMock(spec=RepeaterState)
+        src_rpt.repeater_id = self.SRC_RPT_BYTES
+        src_rpt.connection_state = 'connected'
+        src_rpt.get_slot_stream = MagicMock(return_value=None)
+        src_rpt.set_slot_stream = MagicMock()
+        src_rpt.slot1_talkgroups = None
+        src_rpt.slot2_talkgroups = None
+        self.proto._repeaters[self.SRC_RPT_BYTES] = src_rpt
+
+        # Patch asyncio.ensure_future (no event loop in sync tests)
+        self._ef_patcher = patch('hblink4.hblink.asyncio.ensure_future')
+        self._ef_patcher.start()
+
+    def tearDown(self):
+        self._ef_patcher.stop()
+
+    def test_private_call_local_user(self):
+        """Private call routes to specific local repeater from user cache."""
+        self.proto._user_cache.update(self.DST_RADIO_ID, self.TARGET_RPT_ID, 'N0CALL', 1, 1)
+
+        result = self.proto._handle_stream_start(
+            self.proto._repeaters[self.SRC_RPT_BYTES],
+            b'\x00\x00\x01', self.DST_BYTES, 1,
+            b'\xaa\xbb\xcc\xdd', call_type_bit=1,
+        )
+        self.assertTrue(result)
+
+    def test_private_call_unknown_user_dropped(self):
+        """Private call to unknown user is dropped."""
+        result = self.proto._handle_stream_start(
+            self.proto._repeaters[self.SRC_RPT_BYTES],
+            b'\x00\x00\x01', self.DST_BYTES, 1,
+            b'\xaa\xbb\xcc\xdd', call_type_bit=1,
+        )
+        self.assertFalse(result)
+
+    def test_private_call_cluster_user(self):
+        """Private call routes to cluster peer hosting target user."""
+        self.proto._user_cache.update(self.DST_RADIO_ID, 312600, 'N0CALL', 1, 1)
+        self.proto._cluster_state = {
+            'node-b': {312600: {'slot1_talkgroups': [1], 'slot2_talkgroups': []}},
+        }
+
+        result = self.proto._handle_stream_start(
+            self.proto._repeaters[self.SRC_RPT_BYTES],
+            b'\x00\x00\x01', self.DST_BYTES, 1,
+            b'\xaa\xbb\xcc\xdd', call_type_bit=1,
+        )
+        self.assertTrue(result)
+
+    def test_private_call_cross_region_cache_hit(self):
+        """Positive cross-region cache routes via backbone."""
+        bus_mock = MagicMock()
+        svc = UserLookupService(bus_mock, 'us-east')
+        svc.cache_result({
+            'radio_id': self.DST_RADIO_ID, 'found': True,
+            'responder_region': 'us-west', 'repeater_id': 312000,
+            'source_node': '', 'query_id': 1,
+        })
+        self.proto._user_lookup_service = svc
+        self.proto._backbone_bus = MagicMock()
+
+        result = self.proto._handle_stream_start(
+            self.proto._repeaters[self.SRC_RPT_BYTES],
+            b'\x00\x00\x01', self.DST_BYTES, 1,
+            b'\xaa\xbb\xcc\xdd', call_type_bit=1,
+        )
+        self.assertTrue(result)
+
+    def test_private_call_negative_cache_drops(self):
+        """Negative cache entry causes immediate drop."""
+        bus_mock = MagicMock()
+        svc = UserLookupService(bus_mock, 'us-east')
+        svc.cache_result({
+            'radio_id': self.DST_RADIO_ID, 'found': False,
+            'responder_region': 'us-west', 'query_id': 1,
+        })
+        self.proto._user_lookup_service = svc
+        self.proto._backbone_bus = MagicMock()
+
+        result = self.proto._handle_stream_start(
+            self.proto._repeaters[self.SRC_RPT_BYTES],
+            b'\x00\x00\x01', self.DST_BYTES, 1,
+            b'\xaa\xbb\xcc\xdd', call_type_bit=1,
+        )
+        self.assertFalse(result)
+
+    def test_group_call_still_works(self):
+        """Group calls still use TG-based routing (regression check)."""
+        result = self.proto._handle_stream_start(
+            self.proto._repeaters[self.SRC_RPT_BYTES],
+            b'\x00\x00\x01', b'\x00\x00\x09', 1,
+            b'\xaa\xbb\xcc\xdd', call_type_bit=0,
+        )
+        self.assertTrue(result)
+
+
+class TestPrivateCallLocalTargets(unittest.TestCase):
+    """Phase 6.4: _private_call_local_targets helper."""
+
+    DST_RADIO_ID = 3120001
+    DST_BYTES = DST_RADIO_ID.to_bytes(3, 'big')
+    RPT_ID = 312500
+    RPT_BYTES = RPT_ID.to_bytes(4, 'big')
+
+    def setUp(self):
+        self.proto = _make_hbprotocol_for_routing()
+        self.proto._user_cache = UserCache(timeout_seconds=600)
+
+    def test_local_repeater_found(self):
+        """Returns local repeater when user in cache and repeater connected."""
+        rpt = MagicMock(spec=RepeaterState)
+        rpt.repeater_id = self.RPT_BYTES
+        rpt.connection_state = 'connected'
+        self.proto._repeaters[self.RPT_BYTES] = rpt
+        self.proto._user_cache.update(self.DST_RADIO_ID, self.RPT_ID, '', 1, 1)
+
+        targets = self.proto._private_call_local_targets(self.DST_BYTES)
+        self.assertIn(self.RPT_BYTES, targets)
+
+    def test_no_cache_returns_empty(self):
+        """Returns empty set when user not in cache."""
+        targets = self.proto._private_call_local_targets(self.DST_BYTES)
+        self.assertEqual(targets, set())
+
+    def test_disconnected_repeater_excluded(self):
+        """Disconnected repeater excluded even if in user cache."""
+        rpt = MagicMock(spec=RepeaterState)
+        rpt.repeater_id = self.RPT_BYTES
+        rpt.connection_state = 'disconnected'
+        self.proto._repeaters[self.RPT_BYTES] = rpt
+        self.proto._user_cache.update(self.DST_RADIO_ID, self.RPT_ID, '', 1, 1)
+
+        targets = self.proto._private_call_local_targets(self.DST_BYTES)
+        self.assertEqual(targets, set())
+
+    def test_no_user_cache_returns_empty(self):
+        """Returns empty set when user cache is None."""
+        self.proto._user_cache = None
+        targets = self.proto._private_call_local_targets(self.DST_BYTES)
+        self.assertEqual(targets, set())
 
 
 if __name__ == '__main__':

@@ -114,6 +114,7 @@ class DashboardState:
         self.last_heard_stats: dict = {}  # User cache statistics
         self.websocket_clients: Set[WebSocket] = set()
         self.cluster: dict = {}  # Cluster state: {local_node_id, peers: [...]}
+        self.backbone: dict = {}  # Backbone state: {local_region_id, peers, suggestions}
         self.hblink_connected: bool = False  # Track HBlink4 connection status
         self.stats = {
             'total_calls_today': 0,      # Total RX calls (streams) received today
@@ -851,6 +852,8 @@ class EventReceiver:
             logger.warning(f"Outbound connection error: {conn_name} - {data.get('error_message', 'Unknown error')}")
         elif event_type == 'cluster_state':
             state.cluster = data
+        elif event_type == 'backbone_state':
+            state.backbone = data
 
 
         # Add to event log (only for user-facing on-air activity events)
@@ -931,6 +934,12 @@ async def get_stats():
 async def get_cluster():
     """Get cluster state: peers, latency, repeater counts"""
     return state.cluster or {}
+
+
+@app.get("/api/backbone")
+async def get_backbone():
+    """Get backbone state: peers, latency stats, re-election suggestions"""
+    return state.backbone or {}
 
 
 @app.get("/api/repeater/{repeater_id}")

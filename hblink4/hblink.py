@@ -196,6 +196,9 @@ class HBProtocol(asyncio.DatagramProtocol):
             LOGGER.info(f'Backbone bus configured (region={self._region_id}, gateway mode)')
         else:
             self._backbone_bus = None
+
+        # Cross-region user lookup (Phase 6.4) — initialized when backbone starts
+        self._user_lookup_service = None
     
     # ========== ADDRESS VALIDATION METHODS ==========
     
@@ -1347,7 +1350,11 @@ class HBProtocol(asyncio.DatagramProtocol):
             # Start backbone bus if this is a gateway (Phase 6)
             if self._backbone_bus:
                 await self._backbone_bus.start()
-                LOGGER.info('Backbone bus started')
+                from hblink4.backbone import UserLookupService
+                self._user_lookup_service = UserLookupService(
+                    self._backbone_bus, self._region_id
+                )
+                LOGGER.info('Backbone bus started (user lookup service enabled)')
         except Exception as e:
             LOGGER.error(f'Failed to start cluster bus: {e}', exc_info=True)
 
@@ -1358,12 +1365,13 @@ class HBProtocol(asyncio.DatagramProtocol):
         if msg_type == 'backbone_peer_connected':
             region_id = msg.get('region_id', 'unknown')
             LOGGER.info(f'Backbone: gateway connected from region {region_id}')
-            # Send our TG summary to the new peer
             await self._advertise_tg_summary()
+            self._emit_backbone_state()
 
         elif msg_type == 'backbone_peer_disconnected':
             region_id = msg.get('region_id', 'unknown')
             LOGGER.warning(f'Backbone: gateway disconnected from region {region_id}')
+            self._emit_backbone_state()
 
         elif msg_type == 'tg_summary':
             # Already processed by BackboneBus._handle_peer_message
@@ -1379,6 +1387,14 @@ class HBProtocol(asyncio.DatagramProtocol):
 
         elif msg_type == 'backbone_stream_end':
             self._handle_backbone_stream_end(msg)
+
+        elif msg_type == 'user_lookup_query':
+            if self._user_lookup_service and self._user_cache:
+                await self._user_lookup_service.respond(msg, self._user_cache)
+
+        elif msg_type == 'user_lookup_response':
+            if self._user_lookup_service:
+                self._user_lookup_service.cache_result(msg)
 
     async def _advertise_tg_summary(self):
         """Compute and advertise our region's TG summary to backbone peers."""
@@ -1409,9 +1425,13 @@ class HBProtocol(asyncio.DatagramProtocol):
             return
 
         # Calculate local-only targets (single-hop: never re-forward to backbone or cluster)
-        targets = self._calculate_stream_targets(
-            b'\x00\x00\x00\x00', slot, dst_id, stream_id, rf_src, local_only=True
-        )
+        # Private calls use user-cache-based routing instead of TG-based routing
+        if call_type == 'private':
+            targets = self._private_call_local_targets(dst_id)
+        else:
+            targets = self._calculate_stream_targets(
+                b'\x00\x00\x00\x00', slot, dst_id, stream_id, rf_src, local_only=True
+            )
 
         vs = StreamState(
             repeater_id=b'\x00\x00\x00\x00',
@@ -1677,6 +1697,28 @@ class HBProtocol(asyncio.DatagramProtocol):
             'peers': peers,
         })
 
+    def _emit_backbone_state(self):
+        """Emit backbone state snapshot to dashboard (Phase 6.5b)."""
+        if not self._backbone_bus:
+            return
+        peer_states = self._backbone_bus.get_peer_states()
+        suggestions = self._backbone_bus.get_reelection_suggestions()
+        peers = []
+        for node_id, ps in peer_states.items():
+            peers.append({
+                'node_id': node_id,
+                'region_id': ps['region_id'],
+                'connected': ps['connected'],
+                'alive': ps['alive'],
+                'priority': ps['priority'],
+                'latency_stats': ps['latency_stats'],
+            })
+        self._events.emit('backbone_state', {
+            'local_region_id': self._region_id,
+            'peers': peers,
+            'suggestions': suggestions,
+        })
+
     # ========== Virtual Stream Handlers (Phase 2.3) ==========
 
     def _is_stream_active_locally(self, stream_id: bytes, slot: int) -> bool:
@@ -1715,9 +1757,13 @@ class HBProtocol(asyncio.DatagramProtocol):
             return
 
         # Calculate local-only targets (single-hop rule: never re-forward to cluster/outbound)
-        targets = self._calculate_stream_targets(
-            b'\x00\x00\x00\x00', slot, dst_id, stream_id, rf_src, local_only=True
-        )
+        # Private calls use user-cache-based routing instead of TG-based routing
+        if call_type == 'private':
+            targets = self._private_call_local_targets(dst_id)
+        else:
+            targets = self._calculate_stream_targets(
+                b'\x00\x00\x00\x00', slot, dst_id, stream_id, rf_src, local_only=True
+            )
 
         vs = StreamState(
             repeater_id=b'\x00\x00\x00\x00',
@@ -2198,7 +2244,10 @@ class HBProtocol(asyncio.DatagramProtocol):
             removed = self._user_cache.cleanup()
             if removed > 0:
                 LOGGER.debug(f'User cache cleanup: removed {removed} expired entries')
-    
+        if self._user_lookup_service:
+            self._user_lookup_service.cleanup()
+        self._emit_backbone_state()
+
 
     def _send_initial_state(self):
         """Send current state of all connected repeaters and outbound connections to dashboard (called on reconnect)"""
@@ -2503,13 +2552,68 @@ class HBProtocol(asyncio.DatagramProtocol):
         Handle the start of a new stream on a repeater slot.
         Returns True if the stream can proceed, False if there's a contention.
         """
-        # Check if this is a unit/private call (call_type_bit == 1)
+        # Private call routing (Phase 6.4): look up target user location
+        _private_call_targets = None  # Set to a target_set if private call, None for group
         if call_type_bit == 1:
-            LOGGER.info(f'UNIT CALL received on repeater {rid_to_int(repeater.repeater_id)} slot {slot}: '
-                       f'src={bytes_to_int(rf_src)}, dst={bytes_to_int(dst_id)}, '
-                       f'stream_id={stream_id.hex()} [NOT ROUTED - unit call handling not yet implemented]')
-            return False  # Reject the stream - don't process unit calls yet
-        
+            dst_radio_id = int.from_bytes(dst_id, 'big')
+            target_repeater_id = None
+            target_region = None
+
+            # Check local/cluster user cache
+            if self._user_cache:
+                entry = self._user_cache.lookup(dst_radio_id)
+                if entry:
+                    target_repeater_id = entry.repeater_id
+                    target_region = entry.region_id
+
+            # If no local hit, check cross-region cache (gateway only)
+            if target_repeater_id is None and hasattr(self, '_user_lookup_service') and self._user_lookup_service:
+                xr_entry = self._user_lookup_service.lookup(dst_radio_id)
+                if xr_entry and not xr_entry.negative:
+                    target_region = xr_entry.region_id
+                    target_repeater_id = xr_entry.repeater_id
+                elif xr_entry and xr_entry.negative:
+                    LOGGER.info(f'UNIT CALL negative cache: src={bytes_to_int(rf_src)} dst={dst_radio_id} [DROPPED]')
+                    return False
+                else:
+                    # Cache miss — fire async query for cache warming, drop this call
+                    LOGGER.info(f'UNIT CALL cache miss: src={bytes_to_int(rf_src)} dst={dst_radio_id}, '
+                               f'backbone query sent')
+                    asyncio.ensure_future(self._user_lookup_service.query(dst_radio_id))
+                    return False
+
+            if target_repeater_id is None:
+                LOGGER.info(f'UNIT CALL no cache entry: src={bytes_to_int(rf_src)} dst={dst_radio_id} [DROPPED]')
+                return False
+
+            # Build target set from user cache result
+            _private_call_targets = set()
+            if target_region is None:
+                # Local or intra-region cluster target
+                target_rid_bytes = target_repeater_id.to_bytes(4, 'big') if isinstance(target_repeater_id, int) else target_repeater_id
+                if target_rid_bytes in self._repeaters:
+                    rpt = self._repeaters[target_rid_bytes]
+                    if rpt.connection_state == 'connected':
+                        _private_call_targets.add(target_rid_bytes)
+                else:
+                    # Check cluster peers
+                    for peer_node_id, peer_rpts in self._cluster_state.items():
+                        if target_repeater_id in peer_rpts:
+                            if self._cluster_bus and self._cluster_bus.is_peer_alive(peer_node_id):
+                                _private_call_targets.add(('cluster', peer_node_id))
+                            break
+            else:
+                # Cross-region — route via backbone
+                if self._backbone_bus:
+                    _private_call_targets.add(('backbone', target_region))
+
+            if not _private_call_targets:
+                LOGGER.info(f'UNIT CALL no reachable target: src={bytes_to_int(rf_src)} dst={dst_radio_id} [DROPPED]')
+                return False
+
+            LOGGER.info(f'UNIT CALL routed: src={bytes_to_int(rf_src)} dst={dst_radio_id} '
+                       f'targets={len(_private_call_targets)}')
+
         current_stream = repeater.get_slot_stream(slot)
         current_time = time()
         fast_tg_switch = False  # Track if this is a fast talkgroup switch
@@ -2588,11 +2692,12 @@ class HBProtocol(asyncio.DatagramProtocol):
                 return False
         
         # Check if this repeater is allowed to send traffic on this TS/TGID (inbound routing)
-        if not self._check_inbound_routing(repeater.repeater_id, slot, dst_id):
+        # Skip for private calls — dst_id is a radio ID, not a talkgroup
+        if call_type_bit != 1 and not self._check_inbound_routing(repeater.repeater_id, slot, dst_id):
             # Track denied streams to avoid logging every packet
             denial_key = (repeater.repeater_id, slot, stream_id)
             current_time = time()
-            
+
             # Only log if this is the first packet of this denied stream
             if denial_key not in self._denied_streams:
                 tgid = int.from_bytes(dst_id, 'big')  # Convert only for logging
@@ -2601,16 +2706,19 @@ class HBProtocol(asyncio.DatagramProtocol):
                 allowed_display = sorted(int.from_bytes(tg, 'big') for tg in allowed_tgids) if allowed_tgids else []
                 LOGGER.warning(f'Inbound routing denied: repeater={int.from_bytes(repeater.repeater_id, "big")} '
                               f'TS{slot}/TG{tgid} not in allowed list {allowed_display}')
-                
+
                 # Add to denied cache
                 self._denied_streams[denial_key] = current_time
-            
+
             return False
-        
+
         # Calculate forwarding targets (once per stream, not per packet!)
-        target_repeaters = self._calculate_stream_targets(
-            repeater.repeater_id, slot, dst_id, stream_id, rf_src
-        )
+        if _private_call_targets is not None:
+            target_repeaters = _private_call_targets
+        else:
+            target_repeaters = self._calculate_stream_targets(
+                repeater.repeater_id, slot, dst_id, stream_id, rf_src
+            )
 
         # Multi-connect dedup (Phase 5.5): if a virtual stream with the same
         # stream_id exists (peer forwarded it before our local DMRD arrived),
@@ -3349,8 +3457,28 @@ class HBProtocol(asyncio.DatagramProtocol):
                     target_set.add(('backbone', region_id))
 
         return target_set
-    
-    def _forward_stream(self, data: bytes, source_repeater_id: bytes, slot: int, 
+
+    def _private_call_local_targets(self, dst_id: bytes) -> set:
+        """Build local target set for a private call using user cache lookup.
+
+        Used by virtual stream handlers (cluster/backbone) where the target
+        user should be on a local repeater. Returns set of local repeater_id
+        bytes only (no cluster/backbone targets — single-hop rule).
+        """
+        targets = set()
+        if not self._user_cache:
+            return targets
+        dst_radio_id = int.from_bytes(dst_id, 'big')
+        entry = self._user_cache.lookup(dst_radio_id)
+        if entry:
+            target_rid_bytes = entry.repeater_id.to_bytes(4, 'big') if isinstance(entry.repeater_id, int) else entry.repeater_id
+            if target_rid_bytes in self._repeaters:
+                rpt = self._repeaters[target_rid_bytes]
+                if rpt.connection_state == 'connected':
+                    targets.add(target_rid_bytes)
+        return targets
+
+    def _forward_stream(self, data: bytes, source_repeater_id: bytes, slot: int,
                        rf_src: bytes, dst_id: bytes, stream_id: bytes) -> None:
         """
         Forward DMR stream to target repeaters using cached routing.
@@ -3923,9 +4051,35 @@ async def async_main():
                 return {'ok': True, 'message': 'drain initiated'}
             return {'ok': False, 'error': 'no protocol'}
 
+        elif command == 'backbone':
+            if not proto or not proto._backbone_bus:
+                return {'ok': True, 'enabled': False}
+            peer_states = proto._backbone_bus.get_peer_states()
+            suggestions = proto._backbone_bus.get_reelection_suggestions()
+            peers = []
+            for nid, ps in peer_states.items():
+                peers.append({
+                    'node_id': nid, 'region_id': ps['region_id'],
+                    'connected': ps['connected'], 'alive': ps['alive'],
+                    'priority': ps['priority'],
+                    'latency_stats': ps['latency_stats'],
+                })
+            return {'ok': True, 'enabled': True,
+                    'local_region_id': proto._region_id, 'peers': peers,
+                    'suggestions': suggestions}
+
+        elif command == 'accept-reelection':
+            if not proto or not proto._backbone_bus:
+                return {'ok': False, 'error': 'backbone not enabled'}
+            region_id = cmd.get('region_id')
+            if not region_id:
+                return {'ok': False, 'error': 'region_id required'}
+            return proto._backbone_bus.accept_reelection(region_id)
+
         else:
             return {'ok': False, 'error': f'unknown command: {command}',
-                    'commands': ['status', 'cluster', 'repeaters', 'reload', 'drain']}
+                    'commands': ['status', 'cluster', 'backbone', 'repeaters',
+                                 'reload', 'drain', 'accept-reelection']}
 
     mgmt_server = None
     try:

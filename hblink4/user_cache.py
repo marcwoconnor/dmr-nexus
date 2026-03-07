@@ -35,6 +35,7 @@ class UserEntry:
     last_heard: float = field(default_factory=time)
     talker_alias: Optional[str] = None
     source_node: Optional[str] = None  # Cluster node_id (None = local)
+    region_id: Optional[str] = None    # Region where user was heard (None = local region)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization"""
@@ -49,6 +50,8 @@ class UserEntry:
         }
         if self.source_node:
             d['source_node'] = self.source_node
+        if self.region_id:
+            d['region_id'] = self.region_id
         return d
 
 

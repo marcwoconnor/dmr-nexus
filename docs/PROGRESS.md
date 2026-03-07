@@ -270,6 +270,42 @@ Inter-region gateway bus with TG-based routing table for global scale.
 
 ---
 
+### Completed: Phase 6.4 (Cross-Region User Lookup)
+
+Private call routing via user cache + cross-region lookup through backbone gateways.
+
+#### New Classes
+| Class | File | Purpose |
+|-------|------|---------|
+| `CrossRegionUserEntry` | `hblink4/backbone.py` | Cached cross-region user location (positive/negative) |
+| `UserLookupService` | `hblink4/backbone.py` | Pull-model cross-region lookup: query, respond, cache (60s positive / 30s negative TTL) |
+
+#### Modified Files
+| File | Changes |
+|------|---------|
+| `hblink4/user_cache.py` | `region_id` field on `UserEntry`, included in `to_dict()` |
+| `hblink4/backbone.py` | `CrossRegionUserEntry` dataclass + `UserLookupService` class (~120 lines) |
+| `hblink4/hblink.py` | Private call routing in `_handle_stream_start` (replaces rejection), `_private_call_local_targets` helper, `user_lookup_query`/`user_lookup_response` backbone handlers, `UserLookupService` init + cleanup wiring, private call handling in virtual stream paths |
+| `tests/test_backbone.py` | 13 new tests: `TestUserLookupServiceCache` (9), `TestUserLookupQueryRespond` (4) |
+| `tests/test_cluster.py` | 10 new tests: `TestPrivateCallRouting` (6), `TestPrivateCallLocalTargets` (4) |
+| `tests/test_user_cache.py` | 2 new tests: `region_id` field behavior |
+
+#### Test Results
+- **258 tests total, 258 passing, 0 failures**
+- 25 new Phase 6.4 tests + 233 existing
+
+#### Architecture Insights
+
+**Non-Blocking Cache Warming.** Cross-region lookups can't block real-time voice (~60ms DMR frames). The first private call to a cross-region user fires an async backbone query and drops the call. The response populates the cache (60s positive / 30s negative TTL). Subsequent calls within TTL route correctly. This trades first-call latency for simplicity — acceptable for ham radio where private calls to offline users are common.
+
+**Negative Cache.** Without it, repeated private calls to an unknown radio would flood the backbone with queries. The 30s negative TTL limits backbone query rate to at most one per 30 seconds per unknown user. Positive results overwrite negative cache entries; negative results never overwrite positive ones.
+
+**Inbound Routing Bypass.** Private calls skip `_check_inbound_routing()` because `dst_id` is a radio ID, not a talkgroup — the TG allowlist check would incorrectly reject all private calls.
+
+**Virtual Stream Private Call Routing.** When a gateway receives a backbone/cluster private call stream, it uses `_private_call_local_targets()` (user-cache-based) instead of `_calculate_stream_targets()` (TG-based) to find the target repeater. The single-hop rule still applies — local targets only.
+
+---
+
 ### What's Next
 
 Per the recommended implementation order:
@@ -288,4 +324,50 @@ Per the recommended implementation order:
 | 10 | 5.3 (Cluster-Aware Keepalive) | **DONE** |
 | 11 | 5.5 (Multi-Connect Server-Side Dedup) | **DONE** |
 | 12 | 6.1-6.3 (Backbone + TG Routing + Hierarchical Forwarding) | **DONE** |
-| 13+ | 6.4-6.6 (Cross-Region User Lookup, Gateway Failover, Hardening) | Pending |
+| 13 | 6.4 (Cross-Region User Lookup) | **DONE** |
+| 14 | 6.5 (Gateway Failover) | **DONE** |
+| 15+ | 6.6 (Backbone Hardening) | Pending |
+
+---
+
+### Completed: Phase 6.5 (Gateway Failover)
+
+Dual gateway per region with automatic priority-based failover.
+
+#### Changes
+| File | Changes |
+|------|---------|
+| `hblink4/backbone.py` | `priority` field on `BackbonePeerState`, `_get_gateways_for_region()` helper (priority+latency sort), `send_to_region`/`send_binary_to_region` try gateways in priority order, `_handle_peer_disconnect` only removes region TG table when ALL gateways for that region are dead, priority in `get_peer_states()` output |
+| `config/config_sample.json` | Dual gateway example with priority field |
+| `tests/test_backbone.py` | 9 new tests: priority loading, sorted gateway retrieval, primary preference, failover to secondary, binary failover, TG table preserved on partial disconnect, TG table removed on full disconnect, priority in peer states |
+
+#### Test Results
+- **267 tests total, 267 passing, 0 failures**
+
+#### Design Notes
+**Priority-then-latency sorting.** `_get_gateways_for_region` sorts by `(priority, latency_ms)`. A standby gateway with great latency never beats the primary — latency only breaks ties within the same priority. This gives deterministic routing: always primary unless dead.
+
+**Graceful degradation.** When primary disconnects but secondary lives, the TG table for that region is preserved (no routing disruption). Streams automatically route to secondary. When the primary reconnects and re-advertises its TG summary, it's idempotent — `update_region()` just overwrites.
+
+---
+
+### Completed: Phase 6.5b (Latency Tracing + Re-Election Suggestions)
+
+Two-tier re-election system: latency history, trend-based suggestions, auto-switch for severe degradation.
+
+#### Changes
+| File | Changes |
+|------|---------|
+| `hblink4/backbone.py` | `latency_history` (deque/60) + `consecutive_misses` on `BackbonePeerState`, heartbeat handlers record history + reset misses, `get_latency_stats()` (avg/min/max/jitter/samples), `get_reelection_suggestions()` two-tier (suggest 30%/auto 50%), `_check_reelection()`, `_maybe_auto_switch()` w/ 5min anti-flap, `accept_reelection()` runtime priority swap, `latency_stats` in `get_peer_states()` |
+| `hblink4/hblink.py` | `_emit_backbone_state()` mirrors cluster_state pattern, call sites on connect/disconnect/cleanup, `backbone` + `accept-reelection` mgmt commands |
+| `hbctl.py` | `backbone` display w/ latency stats + suggestion banners, `accept-reelection <region>` command, `send_command_data()` for parameterized commands |
+| `dashboard/server.py` | `backbone` state field, `backbone_state` event handler, `/api/backbone` REST endpoint |
+| `tests/test_backbone.py` | 16 new tests: 5 latency tracking + 11 re-election (suggest/auto/anti-flap/accept/routing) |
+
+#### Test Results
+- **282 tests total, 282 passing, 0 failures**
+
+#### Design Notes
+**Two-tier model.** Suggest tier (30% better over 12+ samples, 2+ missed heartbeats) surfaces recommendations via dashboard and `hbctl backbone`. Auto tier (50% better over full 60-sample window, 5+ misses) swaps priorities automatically with WARNING log. Anti-flap guard prevents auto-switch within 5 minutes per region.
+
+**Runtime-only swap.** `accept_reelection()` swaps `priority` values on `BackbonePeerState` objects in memory. Not persisted to config — restart reverts to original priorities. This is intentional: config represents the intended baseline, runtime swaps are operational overrides.

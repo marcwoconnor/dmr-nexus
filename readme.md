@@ -1,110 +1,147 @@
-# HBlink4
+# HBlink4 — Clustered DMR Network Server
 
-HBlink4 is a DMR Server implementation using the HomeBrew protocol, developed by Cort Buffington, N0MJS. HBlink4 operates as an endpoint network server with granular per-repeater control and does not implement transit call-routing between DMR networks.
+HBlink4 is a DMR (Digital Mobile Radio) network server implementing the HomeBrew protocol for amateur radio networks. Originally developed by Cort Buffington (N0MJS) as a single-server endpoint, HBlink4 has been extensively rewritten and extended by Marc O'Connor, KK4WTI to support **multi-server clustering**, a **cluster-native client protocol**, **inter-region backbone routing**, and **global-scale hierarchical forwarding** — transforming it from a standalone repeater server into a distributed DMR network platform.
+
+## What's Different
+
+The original HBlink was a single-server design: one process, one set of repeaters, no coordination between instances. This fork adds:
+
+| Capability | Description |
+|-----------|-------------|
+| **Cluster Bus** | TCP full-mesh between servers with HMAC-SHA256 auth, heartbeats, automatic reconnect |
+| **Cross-Server Routing** | A transmission on Server A reaches Server B's repeaters if they share talkgroups |
+| **Graceful Failover** | Ordered drain/shutdown, dead peer detection, virtual stream cleanup |
+| **Cluster-Native Protocol** | Stateless token auth, client-driven TG subscriptions, enhanced keepalive with cluster health |
+| **HomeBrew Proxy Adapter** | Legacy repeaters work unchanged — HomeBrew auth translates to native subscriptions internally |
+| **Multi-Connect Dedup** | Clients can connect to multiple servers simultaneously for zero-downtime failover |
+| **Backbone Bus** | Gateway-only inter-region TCP mesh for global scale (separate port, separate secrets) |
+| **TG Routing Table** | Gateways compute regional TG unions, advertise on change only — no broadcast storms |
+| **Hierarchical Forwarding** | Single-hop cross-region stream forwarding through gateway nodes |
+| **Cross-Region User Lookup** | Pull-model private call routing across regions with positive/negative caching |
+| **Config Hot-Reload** | SIGHUP reloads routing rules, re-evaluates connections, no restart needed |
+| **Management Interface** | Unix socket CLI (`hbctl`) for cluster status, drain, reload, repeater list |
+| **Real-Time Dashboard** | FastAPI + WebSocket dashboard with cluster-wide visibility |
 
 ## Architecture
 
-HBlink4 focuses on being an efficient **endpoint network server** with the following design principles:
-
-- **Per-repeater routing rules** using TS/TGID tuples for precise call handling
-- **Individual repeater management** rather than server-level "system" groupings
-- **Direct source connectivity** without multi-hop relay complexity
-- **Granular per-repeater control and monitoring**
-- **Tightly integrated web dashboard** - Real-time monitoring with WebSocket updates
-
-## Features
-
-- **Native dual-stack IPv4/IPv6 support** - Simultaneous listening on both protocols for maximum compatibility
-- Modern Python implementation with type hints
-- Improved error handling and logging
-- JSON-based configuration
-- Enhanced repeater management
-- Built on Twisted framework for reliable async operation
-- **Tightly integrated web dashboard** - Real-time monitoring with modern look and feel (see [Dashboard Documentation](dashboard/README.md))
-- **Stream tracking with immediate DMR terminator detection (~60ms)**
-- **Real-time duration counter with 1-second updates**
-- **Two-tier stream end detection (immediate terminator + timeout fallback)**
-- **User routing cache for efficient private call routing**
-- Pattern-based repeater configuration and blacklisting
-- Per-slot transmission management
-
-## Installation
-
-> **⚠️ IMPORTANT**: Clone and run HBlink4 as the same user account. The systemd service files are configured to run as the user who owns the installation directory. The dashboard writes files for persistence across restarts and needs write access as well.
-
-1. Clone this repository:
-```bash
-git clone https://github.com/yourusername/HBlink4.git
-cd HBlink4
+```
+                         Region A                                    Region B
+              ┌──────────────────────────┐                ┌──────────────────────────┐
+              │                          │   Backbone Bus  │                          │
+  Repeaters ──┤  Server 1 ←──────────→ Server 2 (GW) ════════ Server 3 (GW) ←──→ Server 4 │
+              │       ↕  Cluster Bus  ↕  │   (port 62033)  │       ↕  Cluster Bus  ↕  │
+              │  Server 5 ←──────────→ Server 6             Server 7 ←──────────→ Server 8 │
+              └──────────────────────────┘                └──────────────────────────┘
 ```
 
-2. Create a virtual environment and activate it:
-```bash
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+- **Intra-region:** Flat TCP mesh (cluster bus, port 62032). All nodes see all repeaters. Streams forwarded by TG match, single-hop.
+- **Inter-region:** Gateway-only TCP mesh (backbone bus, port 62033). TG routing table determines which regions receive each stream. Non-gateway nodes route cross-region traffic through their local gateway.
+- **Private calls:** User cache tracks radio IDs to last-heard repeater. Cross-region lookups use a pull model through backbone gateways with 60s positive / 30s negative cache TTL.
 
-3. Install requirements:
+### Core Components (~7,800 lines)
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `hblink4/hblink.py` | ~4,100 | Central hub — UDP protocol, stream routing, cluster/backbone integration, native protocol, management interface |
+| `hblink4/backbone.py` | ~900 | Inter-region backbone bus, TG routing table, cross-region user lookup service |
+| `hblink4/cluster.py` | ~640 | Intra-region TCP mesh cluster bus, peer management, heartbeats, HMAC auth |
+| `hblink4/events.py` | ~340 | Event emitter to dashboard (length-prefixed JSON over TCP/Unix socket) |
+| `hblink4/user_cache.py` | ~290 | Radio ID tracking for private call routing and dashboard "Last Heard" |
+| `hblink4/models.py` | ~280 | Dataclasses: RepeaterState, OutboundState, StreamState |
+| `hblink4/access_control.py` | ~220 | Pattern-based repeater matching, blacklisting, per-repeater config |
+| `hblink4/cluster_protocol.py` | ~200 | Cluster-native client protocol, stateless HMAC token auth |
+| `hblink4/protocol.py` | ~190 | DMR packet parsing, terminator detection (hot path) |
+| `hblink4/subscriptions.py` | ~170 | Client TG subscription store with config validation |
+
+### Dashboard
+
+FastAPI app receiving events from the core server via socket, pushing to browsers via WebSocket. Shows cluster-wide repeater state, active streams, last heard, and cluster health.
+
+### Test Suite
+
+258 tests across 11 test files (~4,900 lines). All tests use self-contained inline config — no dependency on config files.
+
+## Quick Start
+
 ```bash
+# Setup
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+pip install -r requirements-dashboard.txt  # optional, for dashboard
+
+# Configure
+cp config/config_sample.json config/config.json
+# Edit config.json — see docs/configuration.md
+
+# Run
+python3 run.py                    # Core server
+python3 run_dashboard.py          # Dashboard (separate terminal)
+./run_all.sh                      # Both together
+
+# Tests
+python3 -m pytest tests/ -v
+
+# Management (when running with management socket enabled)
+python3 hbctl.py status
+python3 hbctl.py cluster
+python3 hbctl.py repeaters
 ```
+
+For production deployment with systemd, see [SYSTEMD.md](SYSTEMD.md).
 
 ## Configuration
 
-Copy the sample configuration file and modify it for your needs:
-```bash
-cp config/config_sample.json config/config.json
-```
+JSON configs in `config/`. Key sections:
 
-See the [Configuration Guide](docs/configuration.md) for complete documentation of all settings.
+- `global` — Bind addresses, ports, timeouts, logging, user cache settings
+- `repeater_configurations.patterns` — Per-repeater rules with talkgroup lists per slot
+- `blacklist.patterns` — Block by ID, ID range, or callsign wildcard
+- `outbound_connections` — Server-to-server links
+- `cluster` — Clustering: node_id, peers, shared_secret, region, role (node/gateway)
+- `backbone` — Inter-region gateway mesh: backbone_secret, gateway list
+- `dashboard` — Transport settings (TCP or Unix socket)
 
-## Running
-
-### Production (systemd services)
-For production deployments with automatic startup, see [SYSTEMD.md](SYSTEMD.md).
-
-### Development
-```bash
-# Start all services together
-./run_all.sh
-
-# Or start services separately:
-python3 run.py              # HBlink4 server
-python3 run_dashboard.py    # Web dashboard (in another terminal)
-```
-
-Access the dashboard at http://localhost:8080. See [Dashboard Documentation](dashboard/README.md) for features and configuration.
+See `config/config_sample.json` for a complete example with all sections documented.
 
 ## Documentation
 
-Comprehensive documentation is available in the `docs/` directory:
+- **[Configuration Guide](docs/configuration.md)** — Complete config reference
+- **[Dashboard README](dashboard/README.md)** — Dashboard features
+- **[Systemd Deployment](SYSTEMD.md)** — Production setup
+- **[Connecting Repeaters](docs/connecting_to_hblink4.md)** — Repeater configuration
+- **[Clustering Architecture](docs/clustering_plan.md)** — Multi-server design
+- **[Native Protocol Spec](docs/cluster_native_protocol.md)** — Cluster-native client protocol
+- **[Global Scaling](docs/global_scaling.md)** — Hierarchical routing design
+- **[Implementation Progress](docs/PROGRESS.md)** — Phase-by-phase build notes
 
-- **[Configuration Guide](docs/configuration.md)** - Complete configuration reference with all settings explained
-- **[Dashboard README](dashboard/README.md)** - Dashboard features and usage
-- **[Systemd Service Installation](SYSTEMD.md)** - Production deployment with automatic startup
-- **[Connecting Repeaters](docs/connecting_to_hblink4.md)** - How to connect repeaters to HBlink4
-- **[Stream Tracking](docs/stream_tracking.md)** - How DMR transmission streams are managed
-- **[Hang Time](docs/hang_time.md)** - Preventing conversation interruption
-- **[Protocol Specification](docs/protocol.md)** - HomeBrew DMR protocol details
-- **[Integration Guide](docs/integration.md)** - Using HBlink4 as a module
-- **[Logging](docs/logging.md)** - Log management and rotation
+## Implementation Status
 
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 1.1-1.2 | Cluster Bus + State Advertisement | Done |
+| 1.3 | User Cache Sharing | Done |
+| 1.4 + 4.2 | Dashboard Cluster View | Done |
+| 2.1-2.4 | Cross-Server Stream Routing | Done |
+| 3.1-3.3 | Failover, Drain, Graceful Shutdown | Done |
+| 4.1 + 4.3 | Config Hot-Reload + Management CLI | Done |
+| 5.1-5.2 | Token Auth + Subscriptions | Done |
+| 5.3 | Cluster-Aware Keepalive | Done |
+| 5.4 | HomeBrew Proxy Adapter | Done |
+| 5.5 | Multi-Connect Server-Side Dedup | Done |
+| 6.1-6.3 | Backbone Bus + TG Routing + Hierarchical Forwarding | Done |
+| 6.4 | Cross-Region User Lookup | Done |
+| 6.5 | Gateway Failover (dual gateway per region) | Done |
+| 6.6 | Backbone Hardening (TLS, key rotation, priority queues) | Planned |
 
+## Credits
 
-## Support
-
-No end-user support is provided. The development team for this software is exactly 1 person, with limited resources and no ability to duplicate environments for testing. Flagging genuine code issues is apprecicated, but please to not open issues because it doesn't work the way you'd like it to. There are no feature requests.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request. Do not submit a Pull Request to the main branch for added features without consultation first. Added features may collide with other mainline features under development, and additions that are inconsistent with the goals of the project may not be accepted. If you want to add a feature, it's best to discuss it first. Use alternative branches named for the feature being added.
+- **Cort Buffington, N0MJS** — Original HBlink/HBlink3 design, HomeBrew protocol implementation, single-server architecture. HBlink4 was forked from his work and retains the core UDP protocol handler and packet parsing.
+- **Marc O'Connor, KK4WTI** — Clustering architecture, backbone bus, native client protocol, cross-region routing, global-scale hierarchical forwarding, management interface, and the extensive test suite. All code from Phase 1 through Phase 6.4.
+- The MMDVM and DMR amateur radio community.
 
 ## License
 
-Copyright (C) 2016-2025 Cortney T. Buffington, N0MJS n0mjs@me.com
-This project is licensed under the GNU GPLv3 License - see the LICENSE file for details.
+This project is licensed under the GNU GPLv3 License — see the LICENSE file for details.
 
-## Acknowledgments
-
-- Original HBlink3 by Cort Buffington, N0MJS
-- The MMDVM and DMR community
+Original work Copyright (C) 2016-2025 Cortney T. Buffington, N0MJS.
+Clustering and global-scale extensions Copyright (C) 2025-2026 Marc O'Connor, KK4WTI.

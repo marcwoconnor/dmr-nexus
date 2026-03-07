@@ -7,10 +7,13 @@ import sys
 SOCKET_PATH = '/tmp/hblink4_mgmt.sock'
 
 def send_command(command: str, socket_path: str = SOCKET_PATH) -> dict:
+    return send_command_data({'command': command}, socket_path)
+
+def send_command_data(cmd: dict, socket_path: str = SOCKET_PATH) -> dict:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         sock.connect(socket_path)
-        sock.sendall(json.dumps({'command': command}).encode() + b'\n')
+        sock.sendall(json.dumps(cmd).encode() + b'\n')
         data = b''
         while True:
             chunk = sock.recv(4096)
@@ -27,12 +30,21 @@ def send_command(command: str, socket_path: str = SOCKET_PATH) -> dict:
 def main():
     if len(sys.argv) < 2:
         print('Usage: hbctl.py <command>')
-        print('Commands: status, cluster, repeaters, reload, drain')
+        print('Commands: status, cluster, backbone, repeaters, reload, drain, accept-reelection')
         sys.exit(1)
 
     command = sys.argv[1].lower()
     try:
-        result = send_command(command)
+        if command == 'accept-reelection':
+            if len(sys.argv) < 3:
+                print('Usage: hbctl.py accept-reelection <region_id>')
+                sys.exit(1)
+            result = send_command_data({
+                'command': 'accept-reelection',
+                'region_id': sys.argv[2],
+            })
+        else:
+            result = send_command(command)
     except (ConnectionRefusedError, FileNotFoundError):
         print(f'Error: cannot connect to {SOCKET_PATH} — is HBlink4 running?')
         sys.exit(1)
@@ -54,6 +66,32 @@ def main():
             drain = ' [DRAINING]' if p.get('draining') else ''
             print(f"  {p['node_id']}: {status}, {p['latency_ms']:.1f}ms, "
                   f"{p['repeater_count']} rpt(s){drain}")
+
+    elif command == 'backbone':
+        if not result.get('enabled'):
+            print('Backbone not enabled')
+            return
+        print(f"Region: {result.get('local_region_id')}")
+        for p in result.get('peers', []):
+            status = 'alive' if p['alive'] else ('connected' if p['connected'] else 'down')
+            stats = p.get('latency_stats', {})
+            print(f"  {p['node_id']} [{p['region_id']}] pri={p['priority']}: {status}, "
+                  f"avg={stats.get('avg_ms', 0):.1f}ms, "
+                  f"cur={stats.get('current_ms', 0):.1f}ms, "
+                  f"jitter={stats.get('jitter_ms', 0):.1f}ms, "
+                  f"misses={stats.get('consecutive_misses', 0)}")
+        for s in result.get('suggestions', []):
+            tag = 'AUTO-SWITCH' if s['level'] == 'auto' else 'SUGGEST'
+            print(f"\n  ** {tag}: {s['region_id']} — promote {s['suggested_primary']} "
+                  f"(reason: {s['reason']})")
+            print(f"     Accept: hbctl.py accept-reelection {s['region_id']}")
+
+    elif command == 'accept-reelection':
+        if result.get('ok'):
+            print(f"Re-election accepted: {result.get('new_primary')} is now primary "
+                  f"for {result.get('region_id')} (was: {result.get('old_primary')})")
+        else:
+            print(f"Error: {result.get('error')}")
 
     elif command == 'repeaters':
         for r in result.get('repeaters', []):

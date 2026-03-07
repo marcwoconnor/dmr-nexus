@@ -19,6 +19,7 @@ import json
 import logging
 import struct
 import time as _time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Callable, List, Set, Tuple
 
@@ -54,11 +55,14 @@ class BackbonePeerState:
     region_id: str
     address: str
     port: int
+    priority: int = 0  # Lower = preferred (0 = primary, 1+ = standby)
     connected: bool = False
     authenticated: bool = False
     last_heartbeat_sent: float = 0.0
     last_heartbeat_recv: float = 0.0
     latency_ms: float = 0.0
+    latency_history: deque = field(default_factory=lambda: deque(maxlen=60))
+    consecutive_misses: int = 0
     writer: Optional[asyncio.StreamWriter] = None
     reader: Optional[asyncio.StreamReader] = None
     _reconnect_task: Optional[asyncio.Task] = None
@@ -136,6 +140,124 @@ class TalkgroupRoutingTable:
         return len(self._regions)
 
 
+@dataclass
+class CrossRegionUserEntry:
+    """Cached cross-region user location from backbone lookup."""
+    radio_id: int
+    region_id: str
+    repeater_id: int
+    source_node: str
+    cached_at: float = field(default_factory=_time.time)
+    negative: bool = False  # True = confirmed not found anywhere
+
+
+class UserLookupService:
+    """Cross-region user lookup via backbone gateways.
+
+    Pull model: queries fan out only on local/regional cache miss.
+    Positive cache: 60s TTL. Negative cache: 30s TTL.
+    """
+
+    POSITIVE_TTL = 60.0
+    NEGATIVE_TTL = 30.0
+
+    def __init__(self, backbone_bus: 'BackboneBus', region_id: str):
+        self._backbone_bus = backbone_bus
+        self._region_id = region_id
+        self._cache: Dict[int, CrossRegionUserEntry] = {}
+        self._pending: Dict[int, float] = {}  # query_id -> sent_at
+        self._query_counter = 0
+
+    def lookup(self, radio_id: int) -> Optional[CrossRegionUserEntry]:
+        """Look up cross-region cache. Returns entry if valid, None if miss/expired."""
+        entry = self._cache.get(radio_id)
+        if not entry:
+            return None
+        ttl = self.NEGATIVE_TTL if entry.negative else self.POSITIVE_TTL
+        if (_time.time() - entry.cached_at) > ttl:
+            del self._cache[radio_id]
+            return None
+        return entry
+
+    async def query(self, radio_id: int) -> int:
+        """Send user_lookup_query to all backbone peers. Returns query_id."""
+        self._query_counter += 1
+        qid = self._query_counter
+        self._pending[qid] = _time.time()
+        await self._backbone_bus.broadcast({
+            'type': 'user_lookup_query',
+            'query_id': qid,
+            'radio_id': radio_id,
+            'origin_region': self._region_id,
+        })
+        logger.info(f'User lookup query #{qid}: radio_id={radio_id} sent to backbone')
+        return qid
+
+    async def respond(self, query_msg: dict, user_cache) -> None:
+        """Handle incoming query — check local cache and respond."""
+        radio_id = query_msg['radio_id']
+        query_id = query_msg['query_id']
+        origin_region = query_msg['origin_region']
+
+        entry = user_cache.lookup(radio_id)
+        response = {
+            'type': 'user_lookup_response',
+            'query_id': query_id,
+            'radio_id': radio_id,
+            'found': entry is not None,
+            'responder_region': self._region_id,
+        }
+        if entry:
+            response['repeater_id'] = entry.repeater_id
+            response['source_node'] = entry.source_node or ''
+
+        await self._backbone_bus.send_to_region(origin_region, response)
+
+    def cache_result(self, response: dict) -> None:
+        """Cache a lookup response (positive or negative)."""
+        radio_id = response['radio_id']
+        if response.get('found'):
+            self._cache[radio_id] = CrossRegionUserEntry(
+                radio_id=radio_id,
+                region_id=response.get('responder_region', ''),
+                repeater_id=response.get('repeater_id', 0),
+                source_node=response.get('source_node', ''),
+            )
+            logger.info(f'Cross-region cache: radio {radio_id} found in '
+                       f'{response.get("responder_region", "?")}')
+        else:
+            # Only cache negative if no positive entry exists
+            existing = self._cache.get(radio_id)
+            if not existing or existing.negative:
+                self._cache[radio_id] = CrossRegionUserEntry(
+                    radio_id=radio_id,
+                    region_id=response.get('responder_region', ''),
+                    repeater_id=0,
+                    source_node='',
+                    negative=True,
+                )
+        # Clean up pending
+        qid = response.get('query_id')
+        self._pending.pop(qid, None)
+
+    def invalidate(self, radio_id: int) -> None:
+        """Invalidate cache entry (failed delivery triggers re-query)."""
+        self._cache.pop(radio_id, None)
+
+    def cleanup(self) -> int:
+        """Remove expired entries and stale pending queries. Returns count removed."""
+        now = _time.time()
+        expired = [rid for rid, e in self._cache.items()
+                   if (now - e.cached_at) > (self.NEGATIVE_TTL if e.negative else self.POSITIVE_TTL)]
+        for rid in expired:
+            del self._cache[rid]
+        # Clean stale pending (>10s old)
+        stale = [qid for qid, sent in self._pending.items() if (now - sent) > 10.0]
+        for qid in stale:
+            del self._pending[qid]
+        return len(expired)
+
+
 class BackboneBus:
     """
     Manages TCP connections between gateways in different regions.
@@ -170,6 +292,7 @@ class BackboneBus:
                 region_id=peer_cfg['region_id'],
                 address=peer_cfg['address'],
                 port=peer_cfg.get('port', 62033),
+                priority=peer_cfg.get('priority', 0),
             )
 
         # TG routing table
@@ -184,6 +307,7 @@ class BackboneBus:
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._tasks: List[asyncio.Task] = []
         self._running = False
+        self._last_auto_switch: Dict[str, float] = {}  # region_id -> timestamp
 
         # Track our own TG summary for change detection
         self._last_tg_summary: Optional[Tuple[frozenset, frozenset]] = None
@@ -312,18 +436,145 @@ class BackboneBus:
                 await self._send_json(peer, msg)
 
     async def send_to_region(self, region_id: str, msg: dict):
-        """Send a JSON message to the gateway of a specific region."""
-        for peer in self._peers.values():
-            if peer.region_id == region_id and peer.connected and peer.authenticated:
+        """Send a JSON message to the best available gateway for a region."""
+        for peer in self._get_gateways_for_region(region_id):
+            if peer.connected and peer.authenticated:
                 await self._send_json(peer, msg)
-                return  # One gateway per region is enough
+                return
 
     async def send_binary_to_region(self, region_id: str, msg_type: int, data: bytes):
-        """Send binary data to the gateway of a specific region."""
-        for peer in self._peers.values():
-            if peer.region_id == region_id and peer.connected and peer.authenticated:
+        """Send binary data to the best available gateway for a region."""
+        for peer in self._get_gateways_for_region(region_id):
+            if peer.connected and peer.authenticated:
                 await self._send_raw(peer, msg_type, data)
                 return
+
+    def _get_gateways_for_region(self, region_id: str) -> List[BackbonePeerState]:
+        """Get all gateways for a region, sorted by priority (lowest first)."""
+        return sorted(
+            [p for p in self._peers.values() if p.region_id == region_id],
+            key=lambda p: (p.priority, p.latency_ms),
+        )
+
+    def get_latency_stats(self, node_id: str) -> dict:
+        """Get latency analytics for a backbone peer."""
+        peer = self._peers.get(node_id)
+        if not peer or not peer.latency_history:
+            return {'current_ms': 0, 'avg_ms': 0, 'min_ms': 0, 'max_ms': 0,
+                    'jitter_ms': 0, 'samples': 0, 'consecutive_misses': 0}
+        h = list(peer.latency_history)
+        avg = sum(h) / len(h)
+        return {
+            'current_ms': round(peer.latency_ms, 2),
+            'avg_ms': round(avg, 2),
+            'min_ms': round(min(h), 2),
+            'max_ms': round(max(h), 2),
+            'jitter_ms': round(max(h) - min(h), 2),
+            'samples': len(h),
+            'consecutive_misses': peer.consecutive_misses,
+        }
+
+    def get_reelection_suggestions(self) -> List[dict]:
+        """Check all regions for gateways where secondary outperforms primary."""
+        suggestions = []
+        regions: Dict[str, List[BackbonePeerState]] = {}
+        for peer in self._peers.values():
+            regions.setdefault(peer.region_id, []).append(peer)
+        for region_id, peers in regions.items():
+            if len(peers) < 2:
+                continue
+            sorted_peers = sorted(peers, key=lambda p: p.priority)
+            primary = sorted_peers[0]
+            for secondary in sorted_peers[1:]:
+                result = self._check_reelection(primary, secondary)
+                if result:
+                    suggestions.append(result)
+        return suggestions
+
+    def _check_reelection(self, primary: BackbonePeerState,
+                          secondary: BackbonePeerState) -> Optional[dict]:
+        """Compare primary vs secondary — two-tier suggestion/auto-switch."""
+        MIN_SUGGEST = 12   # ~1 min of samples
+        MIN_AUTO = 60      # full 5-min window
+        SUGGEST_RATIO = 0.7   # secondary 30% better
+        AUTO_RATIO = 0.5      # secondary 50% better
+
+        p_len = len(primary.latency_history)
+        s_len = len(secondary.latency_history)
+
+        level = None
+        reason = None
+
+        # Check disconnected primary
+        if not primary.connected and secondary.connected:
+            level = 'auto'
+            reason = 'primary disconnected'
+        # Check missed heartbeats
+        elif primary.consecutive_misses >= 5 and secondary.consecutive_misses == 0:
+            level = 'auto'
+            reason = f'primary missed {primary.consecutive_misses} heartbeats'
+        elif primary.consecutive_misses >= 2 and secondary.consecutive_misses == 0:
+            level = 'suggest'
+            reason = f'primary missed {primary.consecutive_misses} heartbeats'
+        # Check latency trends
+        elif p_len >= MIN_SUGGEST and s_len >= MIN_SUGGEST:
+            p_avg = sum(primary.latency_history) / p_len
+            s_avg = sum(secondary.latency_history) / s_len
+            if p_avg > 0 and s_avg < p_avg * AUTO_RATIO and p_len >= MIN_AUTO and s_len >= MIN_AUTO:
+                level = 'auto'
+                reason = f'secondary avg {s_avg:.0f}ms vs primary {p_avg:.0f}ms (5min window)'
+            elif p_avg > 0 and s_avg < p_avg * SUGGEST_RATIO:
+                level = 'suggest'
+                reason = f'secondary avg {s_avg:.0f}ms vs primary {p_avg:.0f}ms'
+
+        if not level:
+            return None
+
+        p_avg = sum(primary.latency_history) / p_len if p_len else 0
+        s_avg = sum(secondary.latency_history) / s_len if s_len else 0
+        return {
+            'region_id': primary.region_id,
+            'current_primary': primary.node_id,
+            'suggested_primary': secondary.node_id,
+            'reason': reason,
+            'level': level,
+            'primary_avg_ms': round(p_avg, 2),
+            'secondary_avg_ms': round(s_avg, 2),
+        }
+
+    def _maybe_auto_switch(self):
+        """Execute auto-tier re-election if conditions met (called from heartbeat loop)."""
+        ANTI_FLAP_SECONDS = 300.0  # 5 minutes
+        now = _time.time()
+        for suggestion in self.get_reelection_suggestions():
+            if suggestion['level'] != 'auto':
+                continue
+            region = suggestion['region_id']
+            last = self._last_auto_switch.get(region, 0)
+            if now - last < ANTI_FLAP_SECONDS:
+                logger.debug(f'Backbone: auto-switch suppressed for {region} (anti-flap)')
+                continue
+            logger.warning(f'Backbone: AUTO-SWITCHING {region} — promoting '
+                          f'{suggestion["suggested_primary"]} over '
+                          f'{suggestion["current_primary"]} ({suggestion["reason"]})')
+            self.accept_reelection(region)
+            self._last_auto_switch[region] = now
+
+    def accept_reelection(self, region_id: str) -> dict:
+        """Swap priorities for a region's gateways (runtime only, not persisted)."""
+        gateways = self._get_gateways_for_region(region_id)
+        if len(gateways) < 2:
+            return {'ok': False, 'error': f'region {region_id} has <2 gateways'}
+        primary, secondary = gateways[0], gateways[1]
+        primary.priority, secondary.priority = secondary.priority, primary.priority
+        logger.info(f'Backbone: re-election accepted for {region_id} — '
+                   f'{secondary.node_id} now primary (pri={secondary.priority}), '
+                   f'{primary.node_id} demoted (pri={primary.priority})')
+        return {
+            'ok': True, 'region_id': region_id,
+            'new_primary': secondary.node_id,
+            'old_primary': primary.node_id,
+        }
 
     def is_peer_alive(self, node_id: str) -> bool:
         peer = self._peers.get(node_id)
@@ -344,7 +595,9 @@ class BackboneBus:
                 'connected': peer.connected,
                 'authenticated': peer.authenticated,
                 'alive': self.is_peer_alive(pid),
+                'priority': peer.priority,
                 'latency_ms': round(peer.latency_ms, 2),
+                'latency_stats': self.get_latency_stats(pid),
                 'last_heartbeat': peer.last_heartbeat_recv,
             }
         return result
@@ -661,6 +914,8 @@ class BackboneBus:
             sent_at = msg.get('sent_at', now)
             peer.last_heartbeat_recv = now
             peer.latency_ms = (now - sent_at) * 1000
+            peer.latency_history.append(peer.latency_ms)
+            peer.consecutive_misses = 0
             await self._send_json(peer, {
                 'type': 'heartbeat_ack',
                 'sent_at': sent_at,
@@ -672,6 +927,8 @@ class BackboneBus:
             now = _time.time()
             peer.last_heartbeat_recv = now
             peer.latency_ms = (now - msg.get('sent_at', now)) * 1000
+            peer.latency_history.append(peer.latency_ms)
+            peer.consecutive_misses = 0
             return
 
         if msg_type == 'tg_summary':
@@ -701,8 +958,17 @@ class BackboneBus:
 
         if was_connected:
             logger.warning(f'Backbone: gateway {peer.node_id} (region={peer.region_id}) disconnected')
-            # Remove TG summary for this region
-            self.tg_table.remove_region(peer.region_id)
+            # Only remove TG summary if no other gateway for this region is alive
+            other_alive = any(
+                p.connected and p.authenticated
+                for p in self._peers.values()
+                if p.region_id == peer.region_id and p.node_id != peer.node_id
+            )
+            if other_alive:
+                logger.info(f'Backbone: {peer.node_id} down, region {peer.region_id} '
+                           f'still reachable via standby')
+            else:
+                self.tg_table.remove_region(peer.region_id)
             try:
                 await self._on_message({
                     'type': 'backbone_peer_disconnected',
@@ -759,10 +1025,14 @@ class BackboneBus:
 
                     if peer.last_heartbeat_recv > 0:
                         time_since = now - peer.last_heartbeat_recv
+                        if time_since > self._heartbeat_interval * 2:
+                            peer.consecutive_misses += 1
                         if time_since > self._dead_threshold:
                             logger.warning(f'Backbone: gateway {peer.node_id} declared dead')
                             await self._close_peer(peer)
                             await self._handle_peer_disconnect(peer)
+
+                self._maybe_auto_switch()
 
         except asyncio.CancelledError:
             raise

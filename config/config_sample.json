@@ -67,7 +67,8 @@
         "dead_threshold": 15.0,
         "reconnect_interval": 10.0,
         "gateways": [
-            {"node_id": "gw-us-west", "region_id": "us-west", "address": "10.0.2.1", "port": 62033},
+            {"node_id": "gw-us-west-1", "region_id": "us-west", "address": "10.0.2.1", "port": 62033, "priority": 0},
+            {"node_id": "gw-us-west-2", "region_id": "us-west", "address": "10.0.2.2", "port": 62033, "priority": 1},
             {"node_id": "gw-eu", "region_id": "eu", "address": "10.0.3.1", "port": 62033}
         ]
     },
