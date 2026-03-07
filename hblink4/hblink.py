@@ -40,6 +40,7 @@ try:
     from .access_control import RepeaterMatcher
     from .events import EventEmitter
     from .user_cache import UserCache
+    from .cluster import ClusterBus
     from .utils import (
         safe_decode_bytes, normalize_addr, rid_to_int, bytes_to_int,
         cleanup_old_logs, setup_logging, PeerAddress, detect_connection_type
@@ -61,6 +62,7 @@ except ImportError:
     from access_control import RepeaterMatcher
     from events import EventEmitter
     from user_cache import UserCache
+    from cluster import ClusterBus
     from utils import (
         safe_decode_bytes, normalize_addr, rid_to_int, bytes_to_int,
         cleanup_old_logs, setup_logging, PeerAddress, detect_connection_type
@@ -140,7 +142,23 @@ class HBProtocol(asyncio.DatagramProtocol):
             cache_timeout = 60
         self._user_cache = UserCache(timeout_seconds=cache_timeout)
         LOGGER.info(f'User cache initialized with {cache_timeout}s timeout')
-        
+
+        # Cluster bus (Phase 1.1)
+        cluster_config = CONFIG.get('cluster', {})
+        if cluster_config.get('enabled', False):
+            self._cluster_bus = ClusterBus(
+                node_id=cluster_config['node_id'],
+                config=cluster_config,
+                on_message=self._handle_cluster_message
+            )
+            # Cluster state: remote repeaters keyed by node_id -> {repeater_id_int -> info}
+            self._cluster_state: Dict[str, Dict[int, dict]] = {}
+            LOGGER.info(f'Cluster bus configured (node_id={cluster_config["node_id"]}, '
+                       f'{len(cluster_config.get("peers", []))} peers)')
+        else:
+            self._cluster_bus = None
+            self._cluster_state = {}
+
         # No conversion caching - simple int.from_bytes() is fast enough
         # and avoids unbounded cache growth (memory leak prevention)
     
@@ -802,6 +820,11 @@ class HBProtocol(asyncio.DatagramProtocol):
                 LOGGER.info(f"Cancelling connection task for '{conn_name}'")
                 outbound.connection_task.cancel()
 
+        # Stop cluster bus
+        if self._cluster_bus:
+            LOGGER.info("Stopping cluster bus...")
+            asyncio.ensure_future(self._cluster_bus.stop())
+
         # Give time for disconnects to be sent
         import time
         time.sleep(0.5)  # 500ms should be enough for UDP packets to be sent
@@ -848,8 +871,12 @@ class HBProtocol(asyncio.DatagramProtocol):
             asyncio.create_task(self._run_periodic(60, self._cleanup_user_cache, "user cache cleanup"))
         )
         LOGGER.info('Periodic tasks started (repeater timeout, stream timeout, user cache cleanup)')
-        
 
+        # Start cluster bus if configured
+        if self._cluster_bus:
+            self._tasks.append(
+                asyncio.create_task(self._start_cluster_bus(), name='cluster_bus_start')
+            )
 
     def connection_lost(self, exc):
         """Called when transport is disconnected"""
@@ -858,10 +885,148 @@ class HBProtocol(asyncio.DatagramProtocol):
             task.cancel()
         self._tasks.clear()
         
+        # Stop cluster bus
+        if self._cluster_bus:
+            asyncio.ensure_future(self._cluster_bus.stop())
+
         # Stop event emitter
         if hasattr(self, '_events') and self._events:
             self._events.close()
             
+    # ========== CLUSTER BUS METHODS ==========
+
+    async def _start_cluster_bus(self):
+        """Start the cluster bus and compute config hash for drift detection."""
+        try:
+            # Compute config hash from routing-relevant sections
+            import hashlib as _hashlib
+            hash_input = json.dumps({
+                'repeater_configurations': self._config.get('repeater_configurations', {}),
+                'blacklist': self._config.get('blacklist', {}),
+                'connection_type_detection': self._config.get('connection_type_detection', {}),
+            }, sort_keys=True).encode('utf-8')
+            config_hash = _hashlib.sha256(hash_input).hexdigest()[:16]
+            self._cluster_bus.set_config_hash(config_hash)
+
+            await self._cluster_bus.start()
+        except Exception as e:
+            LOGGER.error(f'Failed to start cluster bus: {e}', exc_info=True)
+
+    async def _handle_cluster_message(self, msg: dict):
+        """Handle a message received from a cluster peer."""
+        msg_type = msg.get('type')
+
+        if msg_type == 'peer_connected':
+            node_id = msg['node_id']
+            LOGGER.info(f'Cluster peer {node_id} connected ({msg.get("direction", "unknown")})')
+            # Request full state sync
+            await self._cluster_bus.send(node_id, {
+                'type': 'sync_request',
+                'node_id': self._cluster_bus._node_id
+            })
+            # Send our state to the new peer
+            await self._send_cluster_state_to_peer(node_id)
+
+        elif msg_type == 'peer_disconnected':
+            node_id = msg['node_id']
+            LOGGER.warning(f'Cluster peer {node_id} disconnected')
+            # Purge their state
+            if node_id in self._cluster_state:
+                count = len(self._cluster_state[node_id])
+                del self._cluster_state[node_id]
+                LOGGER.info(f'Purged {count} remote repeater(s) from {node_id}')
+
+        elif msg_type == 'sync_request':
+            await self._send_cluster_state_to_peer(msg['node_id'])
+
+        elif msg_type == 'repeater_up':
+            self._handle_remote_repeater_up(msg)
+
+        elif msg_type == 'repeater_down':
+            self._handle_remote_repeater_down(msg)
+
+        elif msg_type == 'sync_state':
+            self._handle_sync_state(msg)
+
+    async def _send_cluster_state_to_peer(self, peer_node_id: str):
+        """Send all local repeater info to a specific peer (full sync)."""
+        repeaters = []
+        for rid, rpt in self._repeaters.items():
+            if rpt.connection_state != 'connected':
+                continue
+            repeaters.append({
+                'repeater_id': rid_to_int(rid),
+                'callsign': rpt.get_callsign_str(),
+                'connection_type': rpt.connection_type,
+                'slot1_talkgroups': [int.from_bytes(tg, 'big') for tg in rpt.slot1_talkgroups] if rpt.slot1_talkgroups is not None else None,
+                'slot2_talkgroups': [int.from_bytes(tg, 'big') for tg in rpt.slot2_talkgroups] if rpt.slot2_talkgroups is not None else None,
+            })
+
+        await self._cluster_bus.send(peer_node_id, {
+            'type': 'sync_state',
+            'node_id': self._cluster_bus._node_id,
+            'repeaters': repeaters
+        })
+        LOGGER.debug(f'Sent sync_state with {len(repeaters)} repeater(s) to {peer_node_id}')
+
+    def _handle_remote_repeater_up(self, msg: dict):
+        """Handle a repeater_up message from a cluster peer."""
+        node_id = msg['node_id']
+        if node_id not in self._cluster_state:
+            self._cluster_state[node_id] = {}
+
+        rid = msg['repeater_id']
+        self._cluster_state[node_id][rid] = {
+            'repeater_id': rid,
+            'callsign': msg.get('callsign', ''),
+            'connection_type': msg.get('connection_type', 'unknown'),
+            'slot1_talkgroups': msg.get('slot1_talkgroups'),
+            'slot2_talkgroups': msg.get('slot2_talkgroups'),
+        }
+        LOGGER.info(f'Cluster: repeater {rid} ({msg.get("callsign", "?")}) UP on {node_id}')
+
+    def _handle_remote_repeater_down(self, msg: dict):
+        """Handle a repeater_down message from a cluster peer."""
+        node_id = msg['node_id']
+        rid = msg['repeater_id']
+        if node_id in self._cluster_state and rid in self._cluster_state[node_id]:
+            del self._cluster_state[node_id][rid]
+            LOGGER.info(f'Cluster: repeater {rid} DOWN on {node_id}')
+
+    def _handle_sync_state(self, msg: dict):
+        """Handle a full state sync from a cluster peer."""
+        node_id = msg['node_id']
+        repeaters = msg.get('repeaters', [])
+        self._cluster_state[node_id] = {}
+        for rpt in repeaters:
+            self._cluster_state[node_id][rpt['repeater_id']] = rpt
+        LOGGER.info(f'Cluster: synced {len(repeaters)} repeater(s) from {node_id}')
+
+    async def _broadcast_repeater_up(self, repeater_id: bytes, repeater: 'RepeaterState'):
+        """Broadcast repeater_up to all cluster peers."""
+        if not self._cluster_bus:
+            return
+        rid_int = rid_to_int(repeater_id)
+        await self._cluster_bus.broadcast({
+            'type': 'repeater_up',
+            'node_id': self._cluster_bus._node_id,
+            'repeater_id': rid_int,
+            'callsign': repeater.get_callsign_str(),
+            'connection_type': repeater.connection_type,
+            'slot1_talkgroups': [int.from_bytes(tg, 'big') for tg in repeater.slot1_talkgroups] if repeater.slot1_talkgroups is not None else None,
+            'slot2_talkgroups': [int.from_bytes(tg, 'big') for tg in repeater.slot2_talkgroups] if repeater.slot2_talkgroups is not None else None,
+        })
+
+    async def _broadcast_repeater_down(self, repeater_id: bytes):
+        """Broadcast repeater_down to all cluster peers."""
+        if not self._cluster_bus:
+            return
+        await self._cluster_bus.broadcast({
+            'type': 'repeater_down',
+            'node_id': self._cluster_bus._node_id,
+            'repeater_id': rid_to_int(repeater_id),
+        })
+
     def _check_repeater_timeouts(self):
         """Check for and handle repeater timeouts. Repeaters should send periodic RPTPING/RPTP."""
         current_time = time()
@@ -1717,7 +1882,11 @@ class HBProtocol(asyncio.DatagramProtocol):
                 'callsign': repeater.callsign.decode().strip() if repeater.callsign else 'Unknown',
                 'reason': reason
             })
-            
+
+            # Notify cluster peers
+            if self._cluster_bus and repeater.connection_state == 'connected':
+                asyncio.ensure_future(self._broadcast_repeater_down(repeater_id))
+
             # Remove from active repeaters
             del self._repeaters[repeater_id]
             
@@ -1878,6 +2047,10 @@ class HBProtocol(asyncio.DatagramProtocol):
             
             # Emit repeater_connected event (lightweight, will be sent on ping updates)
             self._events.emit('repeater_connected', self._prepare_repeater_event_data(repeater_id, repeater))
+
+            # Notify cluster peers
+            if self._cluster_bus:
+                asyncio.ensure_future(self._broadcast_repeater_up(repeater_id, repeater))
             
         except Exception as e:
             LOGGER.error(f'Error parsing config: {str(e)}')

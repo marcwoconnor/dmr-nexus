@@ -1,269 +1,398 @@
 """
-Unit tests for the access_control module
+Unit tests for the access_control module.
+
+Each test defines its own config inline so tests don't break
+when config_sample.json changes.
 """
 
 import unittest
-import logging
 from hblink4.access_control import (
     RepeaterMatcher, RepeaterConfig, InvalidPatternError, BlacklistError
 )
 
-# Configure logging to show detailed test information
-logging.basicConfig(level=logging.INFO,
-                   format='%(message)s')
 
-class TestRepeaterMatcher(unittest.TestCase):
+def _make_config(patterns=None, default=None, blacklist_patterns=None):
+    """Build a config dict for RepeaterMatcher."""
+    cfg = {
+        'repeater_configurations': {
+            'patterns': patterns or []
+        }
+    }
+    if default is not None:
+        cfg['repeater_configurations']['default'] = default
+    if blacklist_patterns:
+        cfg['blacklist'] = {'patterns': blacklist_patterns}
+    return cfg
+
+
+class TestSpecificIdMatch(unittest.TestCase):
+    """Test matching by specific repeater IDs."""
+
     def setUp(self):
-        """Load test configuration from the sample config file"""
-        import json
-        import os
-
-        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 
-                                 'config', 'config_sample.json')
-        
-        with open(config_path, 'r') as f:
-            full_config = json.load(f)
-            
-        # Include both repeater and blacklist configurations
-        self.config = {
-            "repeaters": full_config["repeater_configurations"],
-            "blacklist": full_config["blacklist"]
-        }
-        
-        # Invalid configuration with multiple match types
-        self.invalid_config = {
-            "repeaters": {
-                "patterns": [
-                    {
-                        "name": "Invalid Multiple Matches",
-                        "match": {
-                            "ids": [312100],
-                            "callsigns": ["WA0EDA*"]
-                        },
-                        "config": {
-                            "enabled": True,
-                            "timeout": 20,
-                            "passphrase": "invalid",
-                            "talkgroups": [3120],
-                            "description": "Invalid Config"
-                        }
-                    }
-                ],
-                "default": full_config["repeater_configurations"]["default"]
+        self.config = _make_config(patterns=[
+            {
+                'name': 'Core Repeaters',
+                'match': {'ids': [312000, 312001]},
+                'config': {
+                    'passphrase': 'core-key',
+                    'slot1_talkgroups': [8, 9],
+                    'slot2_talkgroups': [3120, 3121]
+                }
+            },
+            {
+                'name': 'Club Network',
+                'match': {'ids': [312100, 312101, 312102]},
+                'config': {
+                    'passphrase': 'club-key',
+                    'slot1_talkgroups': [8],
+                    'slot2_talkgroups': [3100]
+                }
             }
-        }
-        
-        logging.info("\n=== Test Configuration Loaded ===")
-        logging.info("Testing with patterns from config file:")
-        for pattern in self.config["repeaters"]["patterns"]:
-            logging.info(f"\nPattern: {pattern['name']}")
-            logging.info(f"Match criteria: {pattern['match']}")
-            logging.info(f"Configuration: {pattern['config']}")
+        ])
         self.matcher = RepeaterMatcher(self.config)
 
-    def _format_config_section(self, section: dict) -> str:
-        """Helper to format a config section for display"""
-        import json
-        return json.dumps(section, indent=2)
+    def test_exact_id_match(self):
+        config = self.matcher.get_repeater_config(312000, 'TEST')
+        self.assertEqual(config.passphrase, 'core-key')
+        self.assertEqual(config.slot1_talkgroups, [8, 9])
 
-    def test_multiple_match_types(self):
-        """Test that configuration with multiple match types is now supported"""
-        logging.info("\n=== Testing Multiple Match Types Support ===")
-        logging.info("Creating matcher with multiple match types in one pattern:")
-        # Update invalid_config to remove 'enabled' field
-        valid_multi_config = {
-            "repeaters": {
-                "patterns": [
-                    {
-                        "name": "Multi-Match Pattern",
-                        "match": {
-                            "ids": [312100],
-                            "callsigns": ["WA0EDA*"]
-                        },
-                        "config": {
-                            "passphrase": "multi-match-key",
-                            "slot1_talkgroups": [3120],
-                            "slot2_talkgroups": [3121]
-                        }
-                    }
-                ],
-                "default": self.config["repeaters"]["default"]
+    def test_second_pattern_match(self):
+        config = self.matcher.get_repeater_config(312100, 'TEST')
+        self.assertEqual(config.passphrase, 'club-key')
+
+    def test_no_match_returns_none(self):
+        config = self.matcher.get_repeater_config(999999, 'TEST')
+        self.assertIsNone(config)
+
+
+class TestIdRangeMatch(unittest.TestCase):
+    """Test matching by ID ranges."""
+
+    def setUp(self):
+        self.config = _make_config(patterns=[
+            {
+                'name': 'Regional Network',
+                'match': {'id_ranges': [[310000, 310999], [312000, 312999]]},
+                'config': {
+                    'passphrase': 'regional-key',
+                    'slot1_talkgroups': [1, 2, 3],
+                    'slot2_talkgroups': [3100, 3120]
+                }
             }
-        }
-        logging.info(self._format_config_section(valid_multi_config["repeaters"]["patterns"][0]))
-        
-        # Should not raise an error
-        matcher = RepeaterMatcher(valid_multi_config)
-        
-        # Test that it matches on ID
-        config = matcher.get_repeater_config(312100, "OTHER")
-        self.assertEqual(config.passphrase, "multi-match-key")
-        logging.info(f"Result: Matched on ID 312100")
-        
-        # Test that it matches on callsign
-        config = matcher.get_repeater_config(999999, "WA0EDA-1")
-        self.assertEqual(config.passphrase, "multi-match-key")
-        logging.info(f"Result: Matched on callsign WA0EDA-1")
+        ])
+        self.matcher = RepeaterMatcher(self.config)
 
-    def test_specific_id_match(self):
-        """Test matching a specific radio ID from the Club Network"""
-        logging.info("\n=== Testing Specific Radio ID Match ===")
-        radio_id = 312100  # First ID in Club Network, but also in KS-DMR range
-        callsign = "WA0EDA-TEST"
-        logging.info(f"Testing repeater - ID: {radio_id}, Callsign: {callsign}")
-        logging.info("Note: This ID is in the KS-DMR range (312000-312099), which appears first in config")
-        
-        matching_pattern = next(p for p in self.config["repeaters"]["patterns"] 
-                              if p["name"] == "KS-DMR Network")
-        logging.info(f"Matching configuration section:\n{self._format_config_section(matching_pattern)}")
-        
-        config = self.matcher.get_repeater_config(radio_id, callsign)
-        logging.info(f"Result: MATCHED KS-DMR range (first pattern in order)")
-        logging.info(f"Configuration applied:")
-        logging.info(f"- Passphrase: {config.passphrase}")
-        logging.info(f"- Slot 1 TGs: {config.slot1_talkgroups}")
-        logging.info(f"- Slot 2 TGs: {config.slot2_talkgroups}")
-        
-        # Since KS-DMR Network pattern comes first and matches, we get its config
-        self.assertEqual(config.passphrase, "ks-dmr-network-key")
-        self.assertEqual(config.slot1_talkgroups, [8, 9])
-        self.assertEqual(config.slot2_talkgroups, [3120, 3121, 3122])
+    def test_in_first_range(self):
+        config = self.matcher.get_repeater_config(310500, 'TEST')
+        self.assertEqual(config.passphrase, 'regional-key')
 
-    def test_id_range_match(self):
-        """Test matching a radio ID within KS-DMR range"""
-        logging.info("\n=== Testing ID Range Match ===")
-        radio_id = 312050  # Middle of KS-DMR range
-        callsign = "WA0EDA"  # Should be ignored because ID range match takes precedence
-        logging.info(f"Testing repeater - ID: {radio_id}, Callsign: {callsign}")
-        
-        matching_pattern = next(p for p in self.config["repeaters"]["patterns"] 
-                              if p["match"].get("id_ranges"))
-        logging.info(f"Matching configuration section:\n{self._format_config_section(matching_pattern)}")
-        
-        config = self.matcher.get_repeater_config(radio_id, callsign)
-        logging.info(f"Result: MATCHED within KS-DMR range (ignoring callsign)")
-        logging.info(f"Configuration applied:")
-        logging.info(f"- Passphrase: {config.passphrase}")
-        logging.info(f"- Slot 1 TGs: {config.slot1_talkgroups}")
-        logging.info(f"- Slot 2 TGs: {config.slot2_talkgroups}")
-        
-        self.assertEqual(config.passphrase, "ks-dmr-network-key")
-        self.assertEqual(config.slot1_talkgroups, [8, 9])
-        self.assertEqual(config.slot2_talkgroups, [3120, 3121, 3122])
+    def test_in_second_range(self):
+        config = self.matcher.get_repeater_config(312050, 'TEST')
+        self.assertEqual(config.passphrase, 'regional-key')
 
-    def test_callsign_match(self):
-        """Test matching WA0EDA callsign pattern"""
-        logging.info("\n=== Testing Callsign Match ===")
-        radio_id = 999999  # ID that doesn't match any specific or range patterns
-        callsign = "WA0EDA-1"
-        logging.info(f"Testing repeater - ID: {radio_id}, Callsign: {callsign}")
-        
-        matching_pattern = next(p for p in self.config["repeaters"]["patterns"] 
-                              if p["match"].get("callsigns"))
-        logging.info(f"Matching configuration section:\n{self._format_config_section(matching_pattern)}")
-        
-        config = self.matcher.get_repeater_config(radio_id, callsign)
-        logging.info(f"Result: MATCHED WA0EDA callsign pattern")
-        logging.info(f"Configuration applied:")
-        logging.info(f"- Passphrase: {config.passphrase}")
-        logging.info(f"- Slot 1 TGs: {config.slot1_talkgroups}")
-        logging.info(f"- Slot 2 TGs: {config.slot2_talkgroups}")
-        
-        self.assertEqual(config.passphrase, "wa0eda-network-key")
-        self.assertEqual(config.slot1_talkgroups, [8])
-        self.assertEqual(config.slot2_talkgroups, [31201, 31202])
+    def test_range_start_boundary(self):
+        config = self.matcher.get_repeater_config(310000, 'TEST')
+        self.assertEqual(config.passphrase, 'regional-key')
 
-    def test_default_config(self):
-        """Test falling back to default configuration"""
-        logging.info("\n=== Testing Default Configuration Fallback ===")
-        radio_id = 999999
-        callsign = "KB1ABC"
-        logging.info(f"Testing repeater - ID: {radio_id}, Callsign: {callsign}")
-        logging.info("No specific rules should match this combination")
-        
-        logging.info(f"Default configuration section:\n{self._format_config_section(self.config['repeaters']['default'])}")
-        
-        config = self.matcher.get_repeater_config(radio_id, callsign)
-        logging.info(f"Result: NO MATCH - using default configuration")
-        logging.info(f"Configuration applied:")
-        logging.info(f"- Passphrase: {config.passphrase}")
-        logging.info(f"- Slot 1 TGs: {config.slot1_talkgroups}")
-        logging.info(f"- Slot 2 TGs: {config.slot2_talkgroups}")
-        
-        self.assertEqual(config.passphrase, "passw0rd")
-        self.assertEqual(config.slot1_talkgroups, [1])
-        self.assertEqual(config.slot2_talkgroups, [2])
+    def test_range_end_boundary(self):
+        config = self.matcher.get_repeater_config(312999, 'TEST')
+        self.assertEqual(config.passphrase, 'regional-key')
 
-    def test_match_priority(self):
-        """Test that pattern order determines priority (first match wins)"""
-        logging.info("\n=== Testing Pattern Order Priority ===")
-        
-        # Test: ID in range matches first pattern
-        radio_id = 312100  # Matches both KS-DMR range (first) AND Club Network IDs (later)
-        callsign = "WA0EDA"  # Also matches WA0EDA pattern
-        logging.info(f"Testing repeater - ID: {radio_id}, Callsign: {callsign}")
-        logging.info("This matches multiple patterns:")
-        logging.info("  1. KS-DMR Network (id_range 312000-312099) - FIRST")
-        logging.info("  2. WA0EDA Repeaters (callsign WA0EDA*)")
-        logging.info("  3. Regional Network (id_range includes 312000-312999)")
-        logging.info("  4. Club Network (ids includes 312100)")
-        
-        config = self.matcher.get_repeater_config(radio_id, callsign)
-        logging.info(f"Result: MATCHED first pattern (KS-DMR Network)")
-        logging.info(f"Using passphrase: {config.passphrase}")
-        self.assertEqual(config.passphrase, "ks-dmr-network-key")  # First matching pattern
-        
-        # Test: ID outside all ranges, matches callsign
-        radio_id = 999999  # Doesn't match any ID patterns
-        logging.info(f"\nTesting repeater - ID: {radio_id}, Callsign: {callsign}")
-        logging.info("This ID matches no ID patterns, only callsign pattern")
-        
-        config = self.matcher.get_repeater_config(radio_id, callsign)
-        logging.info(f"Result: MATCHED WA0EDA callsign pattern")
-        logging.info(f"Using passphrase: {config.passphrase}")
-        self.assertEqual(config.passphrase, "wa0eda-network-key")  # WA0EDA pattern
+    def test_outside_range(self):
+        config = self.matcher.get_repeater_config(311000, 'TEST')
+        self.assertIsNone(config)
+
+
+class TestCallsignMatch(unittest.TestCase):
+    """Test matching by callsign wildcard patterns."""
+
+    def setUp(self):
+        self.config = _make_config(patterns=[
+            {
+                'name': 'WA0EDA Repeaters',
+                'match': {'callsigns': ['WA0EDA*']},
+                'config': {
+                    'passphrase': 'wa0eda-key',
+                    'slot1_talkgroups': [8],
+                    'slot2_talkgroups': [31201]
+                }
+            }
+        ])
+        self.matcher = RepeaterMatcher(self.config)
+
+    def test_callsign_wildcard_match(self):
+        config = self.matcher.get_repeater_config(999999, 'WA0EDA-1')
+        self.assertEqual(config.passphrase, 'wa0eda-key')
+
+    def test_callsign_exact_match(self):
+        config = self.matcher.get_repeater_config(999999, 'WA0EDA')
+        self.assertEqual(config.passphrase, 'wa0eda-key')
+
+    def test_callsign_case_insensitive(self):
+        config = self.matcher.get_repeater_config(999999, 'wa0eda-2')
+        self.assertEqual(config.passphrase, 'wa0eda-key')
+
+    def test_callsign_no_match(self):
+        config = self.matcher.get_repeater_config(999999, 'KB1ABC')
+        self.assertIsNone(config)
+
+
+class TestDefaultConfig(unittest.TestCase):
+    """Test default config fallback."""
+
+    def test_default_used_when_no_match(self):
+        config = _make_config(
+            patterns=[{
+                'name': 'Specific',
+                'match': {'ids': [1]},
+                'config': {'passphrase': 'specific-key'}
+            }],
+            default={'passphrase': 'default-key', 'slot1_talkgroups': [8], 'slot2_talkgroups': [8]}
+        )
+        matcher = RepeaterMatcher(config)
+        result = matcher.get_repeater_config(999999, 'TEST')
+        self.assertEqual(result.passphrase, 'default-key')
+        self.assertEqual(result.slot1_talkgroups, [8])
+        self.assertEqual(result.slot2_talkgroups, [8])
+
+    def test_no_default_returns_none(self):
+        config = _make_config(patterns=[{
+            'name': 'Specific',
+            'match': {'ids': [1]},
+            'config': {'passphrase': 'specific-key'}
+        }])
+        matcher = RepeaterMatcher(config)
+        result = matcher.get_repeater_config(999999, 'TEST')
+        self.assertIsNone(result)
+
+    def test_match_takes_precedence_over_default(self):
+        config = _make_config(
+            patterns=[{
+                'name': 'Specific',
+                'match': {'ids': [312000]},
+                'config': {'passphrase': 'specific-key'}
+            }],
+            default={'passphrase': 'default-key'}
+        )
+        matcher = RepeaterMatcher(config)
+        result = matcher.get_repeater_config(312000, 'TEST')
+        self.assertEqual(result.passphrase, 'specific-key')
+
+
+class TestMatchPriority(unittest.TestCase):
+    """Test that first matching pattern wins (order matters)."""
+
+    def setUp(self):
+        self.config = _make_config(patterns=[
+            {
+                'name': 'Narrow Range',
+                'match': {'id_ranges': [[312000, 312099]]},
+                'config': {'passphrase': 'narrow-key'}
+            },
+            {
+                'name': 'Wide Range',
+                'match': {'id_ranges': [[310000, 312999]]},
+                'config': {'passphrase': 'wide-key'}
+            },
+            {
+                'name': 'Club IDs',
+                'match': {'ids': [312050]},
+                'config': {'passphrase': 'club-key'}
+            }
+        ])
+        self.matcher = RepeaterMatcher(self.config)
+
+    def test_first_pattern_wins(self):
+        # 312050 matches both Narrow Range (first) and Wide Range and Club IDs
+        config = self.matcher.get_repeater_config(312050, 'TEST')
+        self.assertEqual(config.passphrase, 'narrow-key')
+
+    def test_second_pattern_when_first_doesnt_match(self):
+        # 311000 only matches Wide Range
+        config = self.matcher.get_repeater_config(311000, 'TEST')
+        self.assertEqual(config.passphrase, 'wide-key')
+
+    def test_no_match_outside_all(self):
+        config = self.matcher.get_repeater_config(999999, 'TEST')
+        self.assertIsNone(config)
+
+
+class TestMultipleMatchTypes(unittest.TestCase):
+    """Test patterns with multiple match types (OR logic)."""
+
+    def test_matches_on_id(self):
+        config = _make_config(patterns=[{
+            'name': 'Multi',
+            'match': {'ids': [312100], 'callsigns': ['WA0EDA*']},
+            'config': {'passphrase': 'multi-key'}
+        }])
+        matcher = RepeaterMatcher(config)
+        result = matcher.get_repeater_config(312100, 'OTHER')
+        self.assertEqual(result.passphrase, 'multi-key')
+
+    def test_matches_on_callsign(self):
+        config = _make_config(patterns=[{
+            'name': 'Multi',
+            'match': {'ids': [312100], 'callsigns': ['WA0EDA*']},
+            'config': {'passphrase': 'multi-key'}
+        }])
+        matcher = RepeaterMatcher(config)
+        result = matcher.get_repeater_config(999999, 'WA0EDA-1')
+        self.assertEqual(result.passphrase, 'multi-key')
+
+    def test_no_match_on_either(self):
+        config = _make_config(patterns=[{
+            'name': 'Multi',
+            'match': {'ids': [312100], 'callsigns': ['WA0EDA*']},
+            'config': {'passphrase': 'multi-key'}
+        }])
+        matcher = RepeaterMatcher(config)
+        result = matcher.get_repeater_config(999999, 'KB1ABC')
+        self.assertIsNone(result)
+
+
+class TestBlacklist(unittest.TestCase):
+    """Test blacklist enforcement."""
+
+    def _make_blacklist_config(self, blacklist_patterns, repeater_patterns=None):
+        return _make_config(
+            patterns=repeater_patterns or [],
+            blacklist_patterns=blacklist_patterns
+        )
 
     def test_blacklist_specific_id(self):
-        """Test that blacklisted IDs are rejected"""
-        logging.info("\n=== Testing Blacklist Specific ID ===")
-        radio_id = 1
-        callsign = "TEST"
-        logging.info(f"Testing repeater - ID: {radio_id}, Callsign: {callsign}")
-        
-        with self.assertRaises(BlacklistError) as context:
-            self.matcher.get_repeater_config(radio_id, callsign)
-        
-        logging.info(f"Result: Correctly rejected - {str(context.exception)}")
-        self.assertEqual(context.exception.pattern_name, "Blocked IDs")
-        self.assertEqual(context.exception.reason, "Repeated abuse of network")
+        config = self._make_blacklist_config([{
+            'name': 'Blocked IDs',
+            'description': 'Bad actors',
+            'match': {'ids': [1, 2]},
+            'reason': 'Abuse'
+        }])
+        matcher = RepeaterMatcher(config)
+        with self.assertRaises(BlacklistError) as ctx:
+            matcher.get_repeater_config(1, 'TEST')
+        self.assertEqual(ctx.exception.pattern_name, 'Blocked IDs')
+        self.assertEqual(ctx.exception.reason, 'Abuse')
 
-    def test_blacklist_range(self):
-        """Test that IDs in blacklisted ranges are rejected"""
-        logging.info("\n=== Testing Blacklist Range ===")
-        radio_id = 315123
-        callsign = "TEST"
-        logging.info(f"Testing repeater - ID: {radio_id}, Callsign: {callsign}")
-        
-        with self.assertRaises(BlacklistError) as context:
-            self.matcher.get_repeater_config(radio_id, callsign)
-            
-        logging.info(f"Result: Correctly rejected - {str(context.exception)}")
-        self.assertEqual(context.exception.pattern_name, "Blocked Range")
-        self.assertEqual(context.exception.reason, "Unauthorized DMR-MARC range")
+    def test_blacklist_id_range(self):
+        config = self._make_blacklist_config([{
+            'name': 'Blocked Range',
+            'description': 'Unauthorized',
+            'match': {'id_ranges': [[315000, 315999]]},
+            'reason': 'Unauthorized range'
+        }])
+        matcher = RepeaterMatcher(config)
+        with self.assertRaises(BlacklistError):
+            matcher.get_repeater_config(315123, 'TEST')
 
     def test_blacklist_callsign(self):
-        """Test that blacklisted callsigns are rejected"""
-        logging.info("\n=== Testing Blacklist Callsign ===")
-        radio_id = 123456
-        callsign = "BADACTOR123"
-        logging.info(f"Testing repeater - ID: {radio_id}, Callsign: {callsign}")
-        
-        with self.assertRaises(BlacklistError) as context:
-            self.matcher.get_repeater_config(radio_id, callsign)
-            
-        logging.info(f"Result: Correctly rejected - {str(context.exception)}")
-        self.assertEqual(context.exception.pattern_name, "Blocked Callsigns")
-        self.assertEqual(context.exception.reason, "Network abuse")
+        config = self._make_blacklist_config([{
+            'name': 'Blocked Callsigns',
+            'description': 'Banned',
+            'match': {'callsigns': ['BADACTOR*', 'SPAM*']},
+            'reason': 'Network abuse'
+        }])
+        matcher = RepeaterMatcher(config)
+        with self.assertRaises(BlacklistError) as ctx:
+            matcher.get_repeater_config(123456, 'BADACTOR123')
+        self.assertEqual(ctx.exception.pattern_name, 'Blocked Callsigns')
+
+    def test_blacklist_checked_before_patterns(self):
+        """Blacklist takes priority even if a pattern would match."""
+        config = self._make_blacklist_config(
+            blacklist_patterns=[{
+                'name': 'Blocked',
+                'description': 'Blocked',
+                'match': {'ids': [312000]},
+                'reason': 'Banned'
+            }],
+            repeater_patterns=[{
+                'name': 'Core',
+                'match': {'ids': [312000]},
+                'config': {'passphrase': 'core-key'}
+            }]
+        )
+        matcher = RepeaterMatcher(config)
+        with self.assertRaises(BlacklistError):
+            matcher.get_repeater_config(312000, 'TEST')
+
+    def test_blacklist_multiple_ranges(self):
+        config = self._make_blacklist_config([{
+            'name': 'Multi-Range Block',
+            'description': 'Multiple ranges',
+            'match': {'id_ranges': [[100000, 109999], [200000, 209999]]},
+            'reason': 'Unauthorized'
+        }])
+        matcher = RepeaterMatcher(config)
+        with self.assertRaises(BlacklistError):
+            matcher.get_repeater_config(100500, 'TEST')
+        with self.assertRaises(BlacklistError):
+            matcher.get_repeater_config(200500, 'TEST')
+        # Outside ranges should be fine
+        result = matcher.get_repeater_config(150000, 'TEST')
+        self.assertIsNone(result)
+
+    def test_non_blacklisted_passes(self):
+        config = self._make_blacklist_config([{
+            'name': 'Blocked',
+            'description': 'Blocked',
+            'match': {'ids': [1]},
+            'reason': 'Banned'
+        }])
+        matcher = RepeaterMatcher(config)
+        # Should not raise
+        result = matcher.get_repeater_config(312000, 'TEST')
+        self.assertIsNone(result)
+
+
+class TestPatternValidation(unittest.TestCase):
+    """Test that invalid patterns are rejected."""
+
+    def test_empty_match_rejected(self):
+        config = _make_config(patterns=[{
+            'name': 'Empty',
+            'match': {},
+            'config': {'passphrase': 'test'}
+        }])
+        with self.assertRaises(InvalidPatternError):
+            RepeaterMatcher(config)
+
+    def test_invalid_range_rejected(self):
+        config = _make_config(patterns=[{
+            'name': 'Bad Range',
+            'match': {'id_ranges': [[999, 1]]},  # start > end
+            'config': {'passphrase': 'test'}
+        }])
+        with self.assertRaises(InvalidPatternError):
+            RepeaterMatcher(config)
+
+
+class TestGetPatternForRepeater(unittest.TestCase):
+    """Test get_pattern_for_repeater returns the matched pattern object."""
+
+    def test_returns_matching_pattern(self):
+        config = _make_config(patterns=[{
+            'name': 'Core',
+            'match': {'ids': [312000]},
+            'config': {'passphrase': 'core-key'}
+        }])
+        matcher = RepeaterMatcher(config)
+        pattern = matcher.get_pattern_for_repeater(312000, 'TEST')
+        self.assertIsNotNone(pattern)
+        self.assertEqual(pattern.name, 'Core')
+
+    def test_returns_none_for_default(self):
+        config = _make_config(
+            patterns=[{
+                'name': 'Core',
+                'match': {'ids': [312000]},
+                'config': {'passphrase': 'core-key'}
+            }],
+            default={'passphrase': 'default-key'}
+        )
+        matcher = RepeaterMatcher(config)
+        pattern = matcher.get_pattern_for_repeater(999999, 'TEST')
+        self.assertIsNone(pattern)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -40,6 +40,21 @@
             "hblink", "freedmr", "brandmeister", "xlx"
         ]
     },
+    "cluster": {
+        "_comment": "Cluster bus for multi-server deployments. Set enabled=true and configure peers to form a cluster.",
+        "enabled": false,
+        "node_id": "server-1",
+        "bind": "0.0.0.0",
+        "port": 62032,
+        "peers": [
+            {"node_id": "server-2", "address": "10.0.1.2", "port": 62032},
+            {"node_id": "server-3", "address": "10.0.1.3", "port": 62032}
+        ],
+        "shared_secret": "change-me-cluster-secret",
+        "heartbeat_interval": 2.0,
+        "dead_threshold": 6.0,
+        "reconnect_interval": 5.0
+    },
     "dashboard": {
         "enabled": true,
         "disable_ipv6": false,
