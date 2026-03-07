@@ -245,6 +245,31 @@ Server-side stream dedup for clients connected to multiple servers simultaneousl
 
 ---
 
+### Completed: Phase 6.1-6.3 (Backbone Bus, TG Routing, Hierarchical Forwarding)
+
+Inter-region gateway bus with TG-based routing table for global scale.
+
+#### New Files
+| File | Lines | Purpose |
+|------|-------|---------|
+| `hblink4/backbone.py` | ~500 | BackboneBus, TalkgroupRoutingTable, RegionalTGSummary |
+| `tests/test_backbone.py` | ~300 | 20 tests: TG routing, TG summary, bus init, TCP integration |
+
+#### Modified Files
+| File | Changes |
+|------|---------|
+| `hblink4/hblink.py` | BackboneBus init, `_handle_backbone_message()`, `_advertise_tg_summary()`, backbone stream handlers, backbone targets in `_calculate_stream_targets()` + `_forward_stream()` + `_end_stream()`, TG re-advertisement on repeater up/down, backbone shutdown |
+| `config/config_sample.json` | `cluster.region`+`cluster.role` fields, `backbone` config section |
+| `tests/test_cluster.py` | 4 new backbone target calc tests, `_backbone_bus`+`_region_id` on test mocks |
+
+#### Test Results
+- **233 tests total, 233 passing, 0 failures**
+- 20 backbone tests + 4 backbone target tests + 209 existing
+
+---
+
+---
+
 ### What's Next
 
 Per the recommended implementation order:
@@ -262,4 +287,5 @@ Per the recommended implementation order:
 | 9 | 5.4 (HomeBrew Proxy Adapter) | **DONE** |
 | 10 | 5.3 (Cluster-Aware Keepalive) | **DONE** |
 | 11 | 5.5 (Multi-Connect Server-Side Dedup) | **DONE** |
-| 12+ | Phase 6.x (Global Scale) | Pending (defer until >10 nodes) |
+| 12 | 6.1-6.3 (Backbone + TG Routing + Hierarchical Forwarding) | **DONE** |
+| 13+ | 6.4-6.6 (Cross-Region User Lookup, Gateway Failover, Hardening) | Pending |

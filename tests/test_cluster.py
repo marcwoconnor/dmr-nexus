@@ -281,6 +281,8 @@ def _make_hbprotocol_for_routing():
     mock._draining_peers = set()
     mock._native_clients = {}
     mock._subscriptions = SubscriptionStore()
+    mock._backbone_bus = None
+    mock._region_id = 'default'
 
     # Bind real methods
     mock._calculate_stream_targets = HBProtocol._calculate_stream_targets.__get__(mock)
@@ -835,6 +837,7 @@ class TestGracefulShutdown(unittest.IsolatedAsyncioTestCase):
         mock._cluster_bus.stop = MagicMock(side_effect=noop)
         mock._port = None
         mock._events = MagicMock()
+        mock._backbone_bus = None
 
         # Bind real methods
         mock.graceful_shutdown = HBProtocol.graceful_shutdown.__get__(mock)
@@ -1672,6 +1675,74 @@ class TestClusterAwarePong(unittest.TestCase):
         proto._draining = True
         health = self._send_ping(proto, tm)
         self.assertTrue(health['redirect'])
+
+
+# ========== Phase 6.3: Backbone Target Calculation Tests ==========
+
+class TestBackboneTargetCalculation(unittest.TestCase):
+    """Backbone targets appear in _calculate_stream_targets when TG matches remote region."""
+
+    def setUp(self):
+        self.proto = _make_hbprotocol_for_routing()
+
+    def test_backbone_target_when_region_has_tg(self):
+        """Remote region with matching TG appears as backbone target."""
+        from hblink4.backbone import BackboneBus, TalkgroupRoutingTable
+        bb = MagicMock()
+        bb.tg_table = TalkgroupRoutingTable()
+        bb.tg_table.update_region('us-west', {8, 9}, {3120})
+        self.proto._backbone_bus = bb
+        self.proto._region_id = 'us-east'
+
+        targets = self.proto._calculate_stream_targets(
+            b'\x00\x00\x00\x01', 1, b'\x00\x00\x08', b'\xaa\xbb\xcc\xdd', b'\x00\x00\x01'
+        )
+        self.assertIn(('backbone', 'us-west'), targets)
+
+    def test_no_backbone_target_wrong_tg(self):
+        """Remote region without matching TG not targeted."""
+        from hblink4.backbone import BackboneBus, TalkgroupRoutingTable
+        bb = MagicMock()
+        bb.tg_table = TalkgroupRoutingTable()
+        bb.tg_table.update_region('us-west', {8, 9}, {3120})
+        self.proto._backbone_bus = bb
+        self.proto._region_id = 'us-east'
+
+        targets = self.proto._calculate_stream_targets(
+            b'\x00\x00\x00\x01', 1, b'\x00\x00\x63', b'\xaa\xbb\xcc\xdd', b'\x00\x00\x01'
+        )
+        self.assertNotIn(('backbone', 'us-west'), targets)
+
+    def test_own_region_excluded(self):
+        """Own region excluded from backbone targets."""
+        from hblink4.backbone import BackboneBus, TalkgroupRoutingTable
+        bb = MagicMock()
+        bb.tg_table = TalkgroupRoutingTable()
+        bb.tg_table.update_region('us-east', {8}, set())
+        bb.tg_table.update_region('us-west', {8}, set())
+        self.proto._backbone_bus = bb
+        self.proto._region_id = 'us-east'
+
+        targets = self.proto._calculate_stream_targets(
+            b'\x00\x00\x00\x01', 1, b'\x00\x00\x08', b'\xaa\xbb\xcc\xdd', b'\x00\x00\x01'
+        )
+        self.assertNotIn(('backbone', 'us-east'), targets)
+        self.assertIn(('backbone', 'us-west'), targets)
+
+    def test_no_backbone_when_local_only(self):
+        """local_only=True excludes backbone targets."""
+        from hblink4.backbone import BackboneBus, TalkgroupRoutingTable
+        bb = MagicMock()
+        bb.tg_table = TalkgroupRoutingTable()
+        bb.tg_table.update_region('us-west', {8}, set())
+        self.proto._backbone_bus = bb
+        self.proto._region_id = 'us-east'
+
+        targets = self.proto._calculate_stream_targets(
+            b'\x00\x00\x00\x01', 1, b'\x00\x00\x08', b'\xaa\xbb\xcc\xdd',
+            b'\x00\x00\x01', local_only=True
+        )
+        self.assertNotIn(('backbone', 'us-west'), targets)
 
 
 # ========== Phase 5.5: Multi-Connect Dedup Tests ==========

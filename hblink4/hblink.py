@@ -181,8 +181,21 @@ class HBProtocol(asyncio.DatagramProtocol):
         # Native client sessions: addr -> {token_hash, repeater_id, last_ping}
         self._native_clients: Dict[tuple, dict] = {}
 
-        # No conversion caching - simple int.from_bytes() is fast enough
-        # and avoids unbounded cache growth (memory leak prevention)
+        # Backbone bus for inter-region gateway routing (Phase 6)
+        backbone_config = CONFIG.get('backbone', {})
+        self._region_id = cluster_config.get('region', 'default')
+        self._is_gateway = cluster_config.get('role', 'node') == 'gateway'
+        if backbone_config.get('enabled', False) and self._is_gateway:
+            from hblink4.backbone import BackboneBus
+            self._backbone_bus = BackboneBus(
+                node_id=cluster_config.get('node_id', 'unknown'),
+                region_id=self._region_id,
+                config=backbone_config,
+                on_message=self._handle_backbone_message
+            )
+            LOGGER.info(f'Backbone bus configured (region={self._region_id}, gateway mode)')
+        else:
+            self._backbone_bus = None
     
     # ========== ADDRESS VALIDATION METHODS ==========
     
@@ -892,6 +905,10 @@ class HBProtocol(asyncio.DatagramProtocol):
             LOGGER.info("Stopping cluster bus...")
             await self._cluster_bus.stop()
 
+        # Stop backbone bus (Phase 6)
+        if self._backbone_bus:
+            await self._backbone_bus.stop()
+
         # Brief pause for UDP packets to flush
         await asyncio.sleep(0.5)
         LOGGER.info("Graceful shutdown complete")
@@ -1326,8 +1343,165 @@ class HBProtocol(asyncio.DatagramProtocol):
                 asyncio.ensure_future(self._cluster_bus.broadcast(msg))
             self._subscriptions.set_broadcast_callback(_broadcast_subscription)
             LOGGER.info('Subscription cluster broadcast enabled')
+
+            # Start backbone bus if this is a gateway (Phase 6)
+            if self._backbone_bus:
+                await self._backbone_bus.start()
+                LOGGER.info('Backbone bus started')
         except Exception as e:
             LOGGER.error(f'Failed to start cluster bus: {e}', exc_info=True)
+
+    async def _handle_backbone_message(self, msg: dict):
+        """Handle a message from the backbone bus (inter-region)."""
+        msg_type = msg.get('type')
+
+        if msg_type == 'backbone_peer_connected':
+            region_id = msg.get('region_id', 'unknown')
+            LOGGER.info(f'Backbone: gateway connected from region {region_id}')
+            # Send our TG summary to the new peer
+            await self._advertise_tg_summary()
+
+        elif msg_type == 'backbone_peer_disconnected':
+            region_id = msg.get('region_id', 'unknown')
+            LOGGER.warning(f'Backbone: gateway disconnected from region {region_id}')
+
+        elif msg_type == 'tg_summary':
+            # Already processed by BackboneBus._handle_peer_message
+            # (updates tg_table). We just log here.
+            region_id = msg.get('region_id', 'unknown')
+            LOGGER.info(f'Backbone: TG summary updated for region {region_id}')
+
+        elif msg_type == 'backbone_stream_start':
+            self._handle_backbone_stream_start(msg)
+
+        elif msg_type == 'backbone_stream_data':
+            self._handle_backbone_stream_data(msg)
+
+        elif msg_type == 'backbone_stream_end':
+            self._handle_backbone_stream_end(msg)
+
+    async def _advertise_tg_summary(self):
+        """Compute and advertise our region's TG summary to backbone peers."""
+        if not self._backbone_bus:
+            return
+        s1, s2 = self._backbone_bus.compute_regional_tg_summary(
+            self._cluster_state, self._repeaters
+        )
+        await self._backbone_bus.advertise_tg_summary(s1, s2)
+
+    def _handle_backbone_stream_start(self, msg: dict):
+        """Handle stream_start from a remote region — distribute locally."""
+        origin_region = msg.get('origin_region', '')
+        stream_id = bytes.fromhex(msg['stream_id'])
+        slot = msg['slot']
+        dst_id = msg['dst_id'].to_bytes(3, 'big')
+        rf_src = msg['rf_src'].to_bytes(3, 'big')
+        call_type = msg.get('call_type', 'group')
+
+        # Use region as the node_id prefix to avoid collision with intra-region virtual streams
+        key = (f'bb:{origin_region}', stream_id)
+        if key in self._virtual_streams:
+            return
+
+        # Multi-connect dedup
+        if self._is_stream_active_locally(stream_id, slot):
+            LOGGER.info(f'Suppressed backbone stream {stream_id.hex()} from {origin_region} — active locally')
+            return
+
+        # Calculate local-only targets (single-hop: never re-forward to backbone or cluster)
+        targets = self._calculate_stream_targets(
+            b'\x00\x00\x00\x00', slot, dst_id, stream_id, rf_src, local_only=True
+        )
+
+        vs = StreamState(
+            repeater_id=b'\x00\x00\x00\x00',
+            rf_src=rf_src, dst_id=dst_id, slot=slot,
+            start_time=time(), last_seen=time(),
+            stream_id=stream_id, call_type=call_type,
+            target_repeaters=targets, routing_cached=True,
+            source_node=f'bb:{origin_region}',
+        )
+        self._virtual_streams[key] = vs
+        LOGGER.info(f'Backbone virtual stream from {origin_region}: slot={slot}, '
+                   f'dst={msg["dst_id"]}, local_targets={len(targets)}')
+
+        # If we're a gateway with cluster peers, forward to intra-region cluster
+        if self._cluster_bus:
+            cluster_peers = [t[1] for t in targets
+                             if isinstance(t, tuple) and t[0] == 'cluster']
+            # Actually for backbone streams, we need to recalculate WITHOUT local_only
+            # to get cluster targets too
+            if self._cluster_bus.connected_peers:
+                asyncio.ensure_future(self._cluster_bus.send_stream_start(
+                    self._cluster_bus.connected_peers, {
+                        'stream_id': stream_id.hex(),
+                        'slot': slot,
+                        'dst_id': int.from_bytes(dst_id, 'big'),
+                        'rf_src': int.from_bytes(rf_src, 'big'),
+                        'call_type': call_type,
+                        'source_repeater': 0,
+                    }
+                ))
+
+    def _handle_backbone_stream_data(self, msg: dict):
+        """Handle binary stream data from remote region."""
+        region_id = msg.get('region_id', '')
+        payload = msg['payload']
+        if len(payload) < 59:
+            return
+
+        stream_id = payload[:4]
+        dmrd_data = payload[4:]
+
+        key = (f'bb:{region_id}', stream_id)
+        vs = self._virtual_streams.get(key)
+        if not vs:
+            return
+
+        vs.last_seen = time()
+        vs.packet_count += 1
+
+        # Forward to local targets + cluster peers
+        _bits = dmrd_data[15] if len(dmrd_data) > 15 else 0
+        _frame_type = (_bits & 0x30) >> 4
+        is_terminator = self._is_dmr_terminator(dmrd_data, _frame_type)
+
+        full_packet = DMRD + dmrd_data
+        for target in vs.target_repeaters:
+            if isinstance(target, bytes):
+                target_repeater = self._repeaters.get(target)
+                if target_repeater and target_repeater.connection_state == 'connected':
+                    self._send_packet(full_packet, target_repeater.sockaddr)
+                    self._update_assumed_stream(
+                        target_repeater, vs.slot, vs.rf_src, vs.dst_id,
+                        stream_id, is_terminator, 0)
+
+        # Forward to cluster peers
+        if self._cluster_bus and self._cluster_bus.connected_peers:
+            asyncio.ensure_future(self._cluster_bus.send_stream_data(
+                self._cluster_bus.connected_peers, payload
+            ))
+
+        if is_terminator:
+            del self._virtual_streams[key]
+
+    def _handle_backbone_stream_end(self, msg: dict):
+        """Handle stream_end from remote region."""
+        region_id = msg.get('origin_region', msg.get('region_id', ''))
+        stream_id_hex = msg.get('stream_id', '')
+        if not stream_id_hex:
+            return
+        stream_id = bytes.fromhex(stream_id_hex)
+        key = (f'bb:{region_id}', stream_id)
+        vs = self._virtual_streams.pop(key, None)
+        if vs:
+            LOGGER.info(f'Backbone stream ended from {region_id}: {stream_id_hex}')
+            # Notify cluster peers
+            if self._cluster_bus and self._cluster_bus.connected_peers:
+                asyncio.ensure_future(self._cluster_bus.send_stream_end(
+                    self._cluster_bus.connected_peers, stream_id_hex,
+                    msg.get('reason', 'backbone_end')
+                ))
 
     async def _handle_cluster_message(self, msg: dict):
         """Handle a message received from a cluster peer."""
@@ -1645,6 +1819,8 @@ class HBProtocol(asyncio.DatagramProtocol):
             'slot1_talkgroups': [int.from_bytes(tg, 'big') for tg in repeater.slot1_talkgroups] if repeater.slot1_talkgroups is not None else None,
             'slot2_talkgroups': [int.from_bytes(tg, 'big') for tg in repeater.slot2_talkgroups] if repeater.slot2_talkgroups is not None else None,
         })
+        # Re-advertise TG summary to backbone (Phase 6)
+        await self._advertise_tg_summary()
 
     async def _broadcast_repeater_down(self, repeater_id: bytes):
         """Broadcast repeater_down to all cluster peers."""
@@ -1655,6 +1831,8 @@ class HBProtocol(asyncio.DatagramProtocol):
             'node_id': self._cluster_bus._node_id,
             'repeater_id': rid_to_int(repeater_id),
         })
+        # Re-advertise TG summary to backbone (Phase 6)
+        await self._advertise_tg_summary()
 
     def _check_repeater_timeouts(self):
         """Check for and handle repeater timeouts. Repeaters should send periodic RPTPING/RPTP."""
@@ -1739,15 +1917,27 @@ class HBProtocol(asyncio.DatagramProtocol):
         )
 
         # Send stream_end to cluster peers (Phase 2.4)
-        if self._cluster_bus and stream.target_repeaters and not stream.source_node:
-            cluster_peers = [t[1] for t in stream.target_repeaters
-                             if isinstance(t, tuple) and t[0] == 'cluster']
-            if cluster_peers:
-                asyncio.ensure_future(
-                    self._cluster_bus.send_stream_end(
-                        cluster_peers, stream.stream_id.hex(), end_reason
+        if stream.target_repeaters and not stream.source_node:
+            if self._cluster_bus:
+                cluster_peers = [t[1] for t in stream.target_repeaters
+                                 if isinstance(t, tuple) and t[0] == 'cluster']
+                if cluster_peers:
+                    asyncio.ensure_future(
+                        self._cluster_bus.send_stream_end(
+                            cluster_peers, stream.stream_id.hex(), end_reason
+                        )
                     )
-                )
+
+            # Send stream_end to backbone regions (Phase 6.3)
+            if self._backbone_bus:
+                backbone_regions = [t[1] for t in stream.target_repeaters
+                                    if isinstance(t, tuple) and t[0] == 'backbone']
+                if backbone_regions:
+                    asyncio.ensure_future(
+                        self._backbone_bus.send_stream_end(
+                            backbone_regions, stream.stream_id.hex(), end_reason
+                        )
+                    )
 
         # Decrement active calls counter if this was an assumed (TX) stream
         if stream.is_assumed:
@@ -2432,19 +2622,29 @@ class HBProtocol(asyncio.DatagramProtocol):
             LOGGER.info(f'Removed virtual stream {stream_id.hex()} — local stream takes priority (multi-connect dedup)')
 
         # Send stream_start to cluster peers (Phase 2.4)
+        stream_info = {
+            'stream_id': stream_id.hex(),
+            'slot': slot,
+            'dst_id': int.from_bytes(dst_id, 'big'),
+            'rf_src': int.from_bytes(rf_src, 'big'),
+            'call_type': "private" if call_type_bit else "group",
+            'source_repeater': rid_to_int(repeater.repeater_id),
+        }
         if self._cluster_bus:
             cluster_peers = [t[1] for t in target_repeaters
                              if isinstance(t, tuple) and t[0] == 'cluster']
             if cluster_peers:
                 asyncio.ensure_future(self._cluster_bus.send_stream_start(
-                    cluster_peers, {
-                        'stream_id': stream_id.hex(),
-                        'slot': slot,
-                        'dst_id': int.from_bytes(dst_id, 'big'),
-                        'rf_src': int.from_bytes(rf_src, 'big'),
-                        'call_type': "private" if call_type_bit else "group",
-                        'source_repeater': rid_to_int(repeater.repeater_id),
-                    }
+                    cluster_peers, stream_info
+                ))
+
+        # Send stream_start to backbone regions (Phase 6.3)
+        if self._backbone_bus:
+            backbone_regions = [t[1] for t in target_repeaters
+                                if isinstance(t, tuple) and t[0] == 'backbone']
+            if backbone_regions:
+                asyncio.ensure_future(self._backbone_bus.send_stream_start(
+                    backbone_regions, stream_info
                 ))
 
         # No active stream, start a new one with routing cache
@@ -3138,6 +3338,16 @@ class HBProtocol(asyncio.DatagramProtocol):
                             target_set.add(('cluster', peer_node_id))
                             break
 
+            # Calculate backbone targets (Phase 6.3)
+            # Gateway nodes check the TG routing table for cross-region matches
+            if self._backbone_bus:
+                dst_id_int_bb = int.from_bytes(dst_id, 'big')
+                target_regions = self._backbone_bus.tg_table.get_target_regions(
+                    slot, dst_id_int_bb, exclude_region=self._region_id
+                )
+                for region_id in target_regions:
+                    target_set.add(('backbone', region_id))
+
         return target_set
     
     def _forward_stream(self, data: bytes, source_repeater_id: bytes, slot: int, 
@@ -3183,6 +3393,7 @@ class HBProtocol(asyncio.DatagramProtocol):
         
         # Simple loop through cached targets - no per-packet checks!
         cluster_targets = []
+        backbone_targets = []
         for target in source_stream.target_repeaters:
             # Check if target is an outbound connection, cluster peer, or local repeater
             if isinstance(target, tuple) and target[0] == 'outbound':
@@ -3222,6 +3433,10 @@ class HBProtocol(asyncio.DatagramProtocol):
                 # Collect cluster targets for async send after loop
                 cluster_targets.append(target[1])
 
+            elif isinstance(target, tuple) and target[0] == 'backbone':
+                # Collect backbone targets for async send after loop
+                backbone_targets.append(target[1])
+
             else:
                 # Target is a local repeater (bytes)
                 target_repeater_id = target
@@ -3242,6 +3457,13 @@ class HBProtocol(asyncio.DatagramProtocol):
             payload = stream_id + data  # 4B stream_id + 55B DMRD
             asyncio.ensure_future(
                 self._cluster_bus.send_stream_data(cluster_targets, payload)
+            )
+
+        # Send to backbone regions (Phase 6.3)
+        if backbone_targets and self._backbone_bus:
+            payload = stream_id + data  # 4B stream_id + 55B DMRD
+            asyncio.ensure_future(
+                self._backbone_bus.send_stream_data(backbone_targets, payload)
             )
     
     # ================================
