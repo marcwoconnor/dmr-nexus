@@ -323,6 +323,59 @@
             font-weight: 600;
         }
         
+        /* Cluster Health */
+        .cluster-node {
+            background: #1e293b;
+            padding: 10px 14px;
+            border-radius: 6px;
+            border-left: 3px solid #64748b;
+        }
+        .cluster-node.healthy { border-left-color: #22c55e; }
+        .cluster-node.draining { border-left-color: #eab308; }
+        .cluster-node.dead { border-left-color: #ef4444; }
+        .cluster-node-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .cluster-node-name {
+            font-weight: 600;
+            font-size: 14px;
+            color: #e2e8f0;
+        }
+        .cluster-node-name .local-tag {
+            color: #64748b;
+            font-weight: 400;
+            font-size: 12px;
+        }
+        .cluster-status-dot {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .cluster-status-dot::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #64748b;
+        }
+        .cluster-status-dot.healthy::before { background: #22c55e; }
+        .cluster-status-dot.draining::before { background: #eab308; }
+        .cluster-status-dot.dead::before { background: #ef4444; }
+        .cluster-details {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2px 12px;
+            font-size: 12px;
+        }
+        .cluster-details .cl { color: #64748b; }
+        .cluster-details .cv { color: #cbd5e1; }
+        .cluster-details .cv.mismatch { color: #ef4444; }
+
         /* Repeater Card Layout - Compact Version */
         /* ORIGINAL VALUES FOR REVERT: padding: 2px, margin-bottom: 10px, border-radius: 8px */
         .repeater-card {
@@ -792,6 +845,12 @@
             </div>
         </div>
         
+        <!-- Cluster Health -->
+        <div id="clusterSection" style="display: none;">
+            <h2 class="section-header" style="margin-top: 20px; margin-bottom: 10px;">Cluster Health</h2>
+            <div class="stats-bar" id="clusterContainer"></div>
+        </div>
+
         <!-- Last Heard Users (Last 10) -->
         <h2 class="section-header" style="margin-top: 20px; margin-bottom: 10px;">Last Heard</h2>
         <div class="card">
@@ -880,7 +939,9 @@
                 total_duration_today: 0,
                 retransmitted_calls: 0
             },
-            config: {}
+            config: {},
+            cluster: {},
+            backbone: {}
         };
         
         // Audio notification system
@@ -1026,16 +1087,23 @@
                     state.events = data.data.events;
                     state.stats = data.data.stats;
                     state.last_heard = data.data.last_heard || [];
-                    
+                    state.cluster = data.data.cluster || {};
+
                     // Update HBlink connection status
                     updateHBlinkStatus(data.data.hblink_connected || false);
-                    
+
+                    updateCluster(state.cluster);
                     updateRepeaters(state.repeaters);
                     updateOutbounds(state.outbounds);
                     updateStreams(state.streams);
                     updateEvents(state.events);
                     updateStats(state.stats, state.repeaters, state.streams);
                     updateLastHeard(state.last_heard);
+                } else if (data.type === 'cluster_state') {
+                    state.cluster = data.data;
+                    updateCluster(state.cluster);
+                } else if (data.type === 'backbone_state') {
+                    state.backbone = data.data;
                 } else if (data.type === 'hblink_status') {
                     // HBlink4 connection status changed
                     updateHBlinkStatus(data.data.connected);
@@ -1350,6 +1418,79 @@
             }
         }
         
+        function updateCluster(clusterData) {
+            const section = document.getElementById('clusterSection');
+            const container = document.getElementById('clusterContainer');
+            if (!clusterData || !clusterData.peers || clusterData.peers.length === 0) {
+                section.style.display = 'none';
+                return;
+            }
+            section.style.display = '';
+
+            const localId = clusterData.local_node_id || 'unknown';
+            const peers = clusterData.peers || [];
+
+            // Collect config hashes to detect mismatch
+            const hashes = new Set(peers.filter(p => p.config_hash).map(p => p.config_hash));
+            const configMismatch = hashes.size > 1;
+
+            // Build local node card + peer cards
+            const localRepeaterCount = Array.isArray(state.repeaters)
+                ? state.repeaters.filter(r => r.status === 'connected').length
+                : Object.keys(state.repeaters || {}).length;
+
+            let html = '';
+            // Local node
+            html += buildClusterCard(localId, true, {
+                connected: true, alive: true, draining: false,
+                latency_ms: null,
+                repeater_count: localRepeaterCount,
+                config_hash: peers[0]?.config_hash || '',
+            }, configMismatch);
+
+            // Peer nodes
+            for (const peer of peers) {
+                html += buildClusterCard(peer.node_id, false, peer, configMismatch);
+            }
+            container.innerHTML = html;
+        }
+
+        function buildClusterCard(nodeId, isLocal, data, configMismatch) {
+            let statusClass, statusLabel;
+            if (data.draining) {
+                statusClass = 'draining';
+                statusLabel = 'DRAINING';
+            } else if (data.connected && data.alive) {
+                statusClass = 'healthy';
+                statusLabel = 'CONNECTED';
+            } else {
+                statusClass = 'dead';
+                statusLabel = data.connected ? 'UNHEALTHY' : 'DISCONNECTED';
+            }
+
+            const latency = isLocal ? 'Local Server'
+                : (data.latency_ms != null
+                    ? (data.latency_ms < 1 ? data.latency_ms.toFixed(2) + 'ms' : Math.round(data.latency_ms) + 'ms')
+                    : '—');
+
+            const repeaters = data.repeater_count ?? '?';
+            const hash = data.config_hash ? data.config_hash.substring(0, 8) : '—';
+            const hashClass = (configMismatch && data.config_hash) ? ' mismatch' : '';
+            const localTag = isLocal ? ' <span class="local-tag">(local)</span>' : '';
+
+            return `<div class="cluster-node ${statusClass}">
+                <div class="cluster-node-header">
+                    <span class="cluster-node-name">${nodeId}${localTag}</span>
+                    <span class="cluster-status-dot ${statusClass}">${statusLabel}</span>
+                </div>
+                <div class="cluster-details">
+                    <span class="cl">Latency</span><span class="cv">${latency}</span>
+                    <span class="cl">Repeaters</span><span class="cv">${repeaters}</span>
+                    <span class="cl">Config</span><span class="cv${hashClass}">${hash}</span>
+                </div>
+            </div>`;
+        }
+
         function updateStats(stats, repeaters, streams) {
             // Count connected inbound repeaters
             const inboundCount = Array.isArray(repeaters) ? repeaters.filter(r => r.status === 'connected').length : 
@@ -2098,11 +2239,11 @@
                 case 'stream_start':
                     return `Stream started: ${data.src_id} → TG ${data.dst_id} on repeater ${data.repeater_id} slot ${data.slot}`;
                 case 'stream_update':
-                    return `Stream update: ${data.packets} packets, ${data.duration}s`;
+                    return `Stream update: ${data.packet_count || data.packets || 0} packets, ${data.duration}s`;
                 case 'stream_end':
                     const endReason = data.end_reason || data.reason || 'unknown';
                     const hangTime = data.hang_time ? `, entering hang time (${data.hang_time}s)` : '';
-                    return `Stream ended (${endReason}): ${data.packets} packets, ${data.duration}s${hangTime}`;
+                    return `Stream ended (${endReason}): ${data.packet_count || data.packets || 0} packets, ${data.duration}s${hangTime}`;
                 case 'hang_time_expired':
                     return `Hang time expired: Repeater ${data.repeater_id} slot ${data.slot}`;
                 default:

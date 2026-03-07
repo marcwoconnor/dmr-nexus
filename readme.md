@@ -136,7 +136,8 @@ See `config/config_sample.json` for a complete example with all sections documen
 ## Credits
 
 - **Cort Buffington, N0MJS** — Original HBlink/HBlink3 design, HomeBrew protocol implementation, single-server architecture. DMR Nexus was built on his work and retains the core UDP protocol handler and packet parsing.
-- **Marc O'Connor, KK4WTI** — DMR Nexus platform: clustering architecture, backbone bus, native client protocol, cross-region routing, global-scale hierarchical forwarding, gateway failover, latency tracing, management interface, and the extensive test suite.
+- **SP2ONG, KC1AWV, K2IE** — HBmonitor, the original web dashboard for HBlink. DMR Nexus's dashboard was inspired by HBmonitor's approach to real-time DMR server monitoring.
+- **Marc O'Connor, KK4WTI** — DMR Nexus platform: clustering architecture, backbone bus, native client protocol, cross-region routing, global-scale hierarchical forwarding, gateway failover, latency tracing, real-time dashboard, management interface, and the extensive test suite.
 - The MMDVM and DMR amateur radio community.
 
 ## License

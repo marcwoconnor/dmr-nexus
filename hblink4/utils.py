@@ -27,7 +27,7 @@ def safe_decode_bytes(data: bytes) -> str:
     """
     if not data:
         return ''
-    return data.decode('utf-8', errors='ignore').strip()
+    return data.decode('utf-8', errors='ignore').strip().strip('\x00')
 
 
 def normalize_addr(addr: PeerAddress) -> Tuple[str, int]:

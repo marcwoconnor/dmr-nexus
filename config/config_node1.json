@@ -1,0 +1,77 @@
+{
+    "global": {
+        "max_missed": 3,
+        "timeout_duration": 30,
+        "disable_ipv6": true,
+        "bind_ipv4": "0.0.0.0",
+        "port_ipv4": 62031,
+        "logging": {
+            "file": "logs/hblink.log",
+            "console_level": "INFO",
+            "file_level": "DEBUG",
+            "retention_days": 30
+        },
+        "stream_timeout": 2.0,
+        "stream_hang_time": 10.0,
+        "management_socket": "/run/dmr-nexus/mgmt.sock",
+        "user_cache": {
+            "timeout": 600
+        }
+    },
+    "connection_type_detection": {
+        "hotspot_packages": [
+            "mmdvm_hs", "dvmega", "zumspot", "jumbospot", "nanodv",
+            "openspot", "dmo", "simplex"
+        ],
+        "network_packages": [
+            "hblink", "freedmr", "brandmeister", "xlx", "dmr+", "tgif", "ipsc"
+        ],
+        "repeater_packages": [
+            "repeater", "duplex", "stm32", "unknown"
+        ],
+        "hotspot_software": [
+            "pi-star", "pistar", "ps4", "wpsd"
+        ],
+        "network_software": [
+            "hblink", "freedmr", "brandmeister", "xlx"
+        ]
+    },
+    "cluster": {
+        "enabled": true,
+        "node_id": "nexus-1",
+        "bind": "0.0.0.0",
+        "port": 62032,
+        "peers": [
+            {"node_id": "nexus-2", "address": "10.31.11.41", "port": 62032}
+        ],
+        "shared_secret": "dmr-nexus-cluster-2026",
+        "heartbeat_interval": 2.0,
+        "dead_threshold": 6.0,
+        "reconnect_interval": 5.0,
+        "region": "lab",
+        "role": "node"
+    },
+    "backbone": {
+        "enabled": false
+    },
+    "dashboard": {
+        "enabled": true,
+        "transport": "tcp",
+        "disable_ipv6": true,
+        "host_ipv4": "0.0.0.0",
+        "port": 8765,
+        "buffer_size": 65536
+    },
+    "blacklist": {
+        "patterns": []
+    },
+    "repeater_configurations": {
+        "patterns": [],
+        "default": {
+            "passphrase": "passw0rd",
+            "slot1_talkgroups": [1, 2, 8, 9],
+            "slot2_talkgroups": [3100, 3120, 9998]
+        }
+    },
+    "outbound_connections": []
+}

@@ -4,7 +4,7 @@ import json
 import socket
 import sys
 
-SOCKET_PATH = '/tmp/hblink4_mgmt.sock'
+SOCKET_PATH = '/run/dmr-nexus/mgmt.sock'
 
 def send_command(command: str, socket_path: str = SOCKET_PATH) -> dict:
     return send_command_data({'command': command}, socket_path)

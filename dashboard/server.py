@@ -1101,7 +1101,9 @@ async def dashboard():
     if not html_path.exists():
         return HTMLResponse("<h1>Dashboard HTML not found</h1><p>Please create dashboard/static/dashboard.html</p>", status_code=404)
     with open(html_path) as f:
-        return HTMLResponse(f.read())
+        return HTMLResponse(f.read(), headers={
+            'Cache-Control': 'no-cache, must-revalidate',
+        })
 
 
 # Mount static files
