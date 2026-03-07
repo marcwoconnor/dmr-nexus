@@ -159,6 +159,13 @@ class HBProtocol(asyncio.DatagramProtocol):
             self._cluster_bus = None
             self._cluster_state = {}
 
+        # Virtual streams from cluster peers: keyed by (node_id, stream_id_bytes)
+        self._virtual_streams: Dict[tuple, StreamState] = {}
+
+        # Graceful shutdown state (Phase 3.3)
+        self._draining = False
+        self._draining_peers: Set[str] = set()  # Cluster peers that are draining
+
         # No conversion caching - simple int.from_bytes() is fast enough
         # and avoids unbounded cache growth (memory leak prevention)
     
@@ -781,29 +788,68 @@ class HBProtocol(asyncio.DatagramProtocol):
     # ========== END HELPER METHODS ==========
         
     def cleanup(self) -> None:
-        """Send disconnect messages to all repeaters and cleanup resources."""
+        """Legacy sync cleanup — delegates to graceful_shutdown via ensure_future."""
+        asyncio.ensure_future(self.graceful_shutdown())
+
+    async def graceful_shutdown(self, drain_timeout: float = None) -> None:
+        """Ordered shutdown: drain → disconnect repeaters → notify cluster → stop.
+
+        1. Stop accepting new logins (reject RPTL)
+        2. Broadcast node_draining to cluster peers
+        3. Wait for active streams to end (up to drain_timeout)
+        4. Send MSTCL to all repeaters
+        5. Broadcast node_down to cluster peers
+        6. Stop cluster bus
+        """
+        if drain_timeout is None:
+            drain_timeout = CONFIG.get('global', {}).get('drain_timeout', 30.0)
+
         LOGGER.info("Starting graceful shutdown...")
-        
-        # Send MSTCL to all connected repeaters
-        if self._port:  # Only attempt to send if we have a port
+
+        # 1. Stop accepting new logins
+        self._draining = True
+
+        # 2. Notify cluster peers
+        if self._cluster_bus:
+            await self._cluster_bus.broadcast({
+                'type': 'node_draining',
+                'node_id': self._cluster_bus._node_id,
+            })
+            LOGGER.info('Broadcast node_draining to cluster peers')
+
+        # 3. Wait for active streams to drain
+        active = self._count_active_streams()
+        if active > 0:
+            LOGGER.info(f'Waiting up to {drain_timeout}s for {active} active stream(s) to end...')
+            deadline = time() + drain_timeout
+            while time() < deadline:
+                active = self._count_active_streams()
+                if active == 0:
+                    LOGGER.info('All streams drained')
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                active = self._count_active_streams()
+                if active > 0:
+                    LOGGER.warning(f'Drain timeout — {active} stream(s) still active, proceeding')
+
+        # 4. Disconnect all repeaters
+        if self._port:
             for repeater_id, repeater in self._repeaters.items():
                 if repeater.connection_state == 'connected':
                     try:
                         LOGGER.info(f"Sending disconnect to repeater {rid_to_int(repeater_id)}")
-                        # asyncio uses sendto() instead of write(data, addr)
                         self._port.sendto(MSTCL, repeater.sockaddr)
                     except Exception as e:
                         LOGGER.error(f"Error sending disconnect to repeater {rid_to_int(repeater_id)}: {e}")
-        
-        # Send RPTCL (disconnect) to all outbound connections
+
+        # Disconnect outbound connections
         for conn_name, outbound in list(self._outbounds.items()):
             if outbound.authenticated and outbound.transport:
                 try:
                     LOGGER.info(f"Sending disconnect to outbound connection '{conn_name}'")
                     our_id_bytes = outbound.config.radio_id.to_bytes(4, 'big')
                     outbound.transport.sendto(RPTCL + our_id_bytes)
-                    
-                    # Emit disconnection event
                     self._events.emit('outbound_disconnected', {
                         'connection_name': conn_name,
                         'radio_id': outbound.config.radio_id,
@@ -813,21 +859,37 @@ class HBProtocol(asyncio.DatagramProtocol):
                     })
                 except Exception as e:
                     LOGGER.error(f"Error sending disconnect to outbound '{conn_name}': {e}")
-        
-        # Cancel all outbound connection tasks
+
+        # Cancel outbound connection tasks
         for conn_name, outbound in self._outbounds.items():
             if outbound.connection_task and not outbound.connection_task.done():
-                LOGGER.info(f"Cancelling connection task for '{conn_name}'")
                 outbound.connection_task.cancel()
 
-        # Stop cluster bus
+        # 5. Notify cluster peers of shutdown
         if self._cluster_bus:
-            LOGGER.info("Stopping cluster bus...")
-            asyncio.ensure_future(self._cluster_bus.stop())
+            await self._cluster_bus.broadcast({
+                'type': 'node_down',
+                'node_id': self._cluster_bus._node_id,
+            })
+            LOGGER.info('Broadcast node_down to cluster peers')
 
-        # Give time for disconnects to be sent
-        import time
-        time.sleep(0.5)  # 500ms should be enough for UDP packets to be sent
+            # 6. Stop cluster bus
+            LOGGER.info("Stopping cluster bus...")
+            await self._cluster_bus.stop()
+
+        # Brief pause for UDP packets to flush
+        await asyncio.sleep(0.5)
+        LOGGER.info("Graceful shutdown complete")
+
+    def _count_active_streams(self) -> int:
+        """Count non-ended streams across all repeaters (for drain wait)."""
+        count = 0
+        for rpt in self._repeaters.values():
+            if rpt.slot1_stream and not rpt.slot1_stream.ended and not rpt.slot1_stream.is_assumed:
+                count += 1
+            if rpt.slot2_stream and not rpt.slot2_stream.ended and not rpt.slot2_stream.is_assumed:
+                count += 1
+        return count
 
     async def _run_periodic(self, interval: float, func, name: str):
         """
@@ -909,6 +971,17 @@ class HBProtocol(asyncio.DatagramProtocol):
             self._cluster_bus.set_config_hash(config_hash)
 
             await self._cluster_bus.start()
+
+            # Wire up user cache broadcast (Phase 1.3)
+            if self._user_cache:
+                def _broadcast_user_heard(entries):
+                    asyncio.ensure_future(self._cluster_bus.broadcast({
+                        'type': 'user_heard',
+                        'node_id': self._cluster_bus._node_id,
+                        'entries': entries,
+                    }))
+                self._user_cache.set_broadcast_callback(_broadcast_user_heard)
+                LOGGER.info('User cache cluster broadcast enabled')
         except Exception as e:
             LOGGER.error(f'Failed to start cluster bus: {e}', exc_info=True)
 
@@ -926,15 +999,32 @@ class HBProtocol(asyncio.DatagramProtocol):
             })
             # Send our state to the new peer
             await self._send_cluster_state_to_peer(node_id)
+            self._emit_cluster_state()
 
         elif msg_type == 'peer_disconnected':
             node_id = msg['node_id']
             LOGGER.warning(f'Cluster peer {node_id} disconnected')
+            self._draining_peers.discard(node_id)
+            # Terminate virtual streams from this peer
+            stale = [k for k in self._virtual_streams if k[0] == node_id]
+            for key in stale:
+                vs = self._virtual_streams[key]
+                for target in (vs.target_repeaters or set()):
+                    if isinstance(target, bytes):
+                        rpt = self._repeaters.get(target)
+                        if rpt:
+                            cs = rpt.get_slot_stream(vs.slot)
+                            if cs and cs.stream_id == vs.stream_id and not cs.ended:
+                                self._end_stream(cs, target, vs.slot, time(), 'peer_disconnected')
+                del self._virtual_streams[key]
+            if stale:
+                LOGGER.info(f'Terminated {len(stale)} virtual stream(s) from {node_id}')
             # Purge their state
             if node_id in self._cluster_state:
                 count = len(self._cluster_state[node_id])
                 del self._cluster_state[node_id]
                 LOGGER.info(f'Purged {count} remote repeater(s) from {node_id}')
+            self._emit_cluster_state()
 
         elif msg_type == 'sync_request':
             await self._send_cluster_state_to_peer(msg['node_id'])
@@ -947,6 +1037,35 @@ class HBProtocol(asyncio.DatagramProtocol):
 
         elif msg_type == 'sync_state':
             self._handle_sync_state(msg)
+
+        elif msg_type == 'stream_start':
+            self._handle_virtual_stream_start(msg)
+
+        elif msg_type == 'stream_data_binary':
+            self._handle_virtual_stream_data(msg)
+
+        elif msg_type == 'stream_end':
+            self._handle_virtual_stream_end(msg)
+
+        elif msg_type == 'user_heard':
+            entries = msg.get('entries', [])
+            node_id = msg['node_id']
+            if entries and self._user_cache:
+                self._user_cache.merge_remote(entries, node_id)
+                LOGGER.debug(f'Merged {len(entries)} user cache entries from {node_id}')
+
+        elif msg_type == 'node_draining':
+            node_id = msg['node_id']
+            self._draining_peers.add(node_id)
+            LOGGER.warning(f'Cluster peer {node_id} is draining — no new streams will be routed there')
+            self._emit_cluster_state()
+
+        elif msg_type == 'node_down':
+            node_id = msg['node_id']
+            self._draining_peers.discard(node_id)
+            LOGGER.warning(f'Cluster peer {node_id} announced shutdown')
+            self._emit_cluster_state()
+            # State will be purged when TCP disconnects (peer_disconnected)
 
     async def _send_cluster_state_to_peer(self, peer_node_id: str):
         """Send all local repeater info to a specific peer (full sync)."""
@@ -984,6 +1103,7 @@ class HBProtocol(asyncio.DatagramProtocol):
             'slot2_talkgroups': msg.get('slot2_talkgroups'),
         }
         LOGGER.info(f'Cluster: repeater {rid} ({msg.get("callsign", "?")}) UP on {node_id}')
+        self._emit_cluster_state()
 
     def _handle_remote_repeater_down(self, msg: dict):
         """Handle a repeater_down message from a cluster peer."""
@@ -992,6 +1112,7 @@ class HBProtocol(asyncio.DatagramProtocol):
         if node_id in self._cluster_state and rid in self._cluster_state[node_id]:
             del self._cluster_state[node_id][rid]
             LOGGER.info(f'Cluster: repeater {rid} DOWN on {node_id}')
+            self._emit_cluster_state()
 
     def _handle_sync_state(self, msg: dict):
         """Handle a full state sync from a cluster peer."""
@@ -1001,6 +1122,138 @@ class HBProtocol(asyncio.DatagramProtocol):
         for rpt in repeaters:
             self._cluster_state[node_id][rpt['repeater_id']] = rpt
         LOGGER.info(f'Cluster: synced {len(repeaters)} repeater(s) from {node_id}')
+        self._emit_cluster_state()
+
+    def _emit_cluster_state(self):
+        """Emit cluster state snapshot to dashboard (Phase 1.4)."""
+        if not self._cluster_bus:
+            return
+        peer_states = self._cluster_bus.get_peer_states()
+        peers = []
+        for node_id, ps in peer_states.items():
+            repeater_count = len(self._cluster_state.get(node_id, {}))
+            peers.append({
+                'node_id': node_id,
+                'connected': ps['connected'],
+                'authenticated': ps['authenticated'],
+                'alive': ps['alive'],
+                'latency_ms': ps['latency_ms'],
+                'last_heartbeat': ps['last_heartbeat'],
+                'config_hash': ps.get('config_hash', ''),
+                'repeater_count': repeater_count,
+                'draining': node_id in self._draining_peers,
+            })
+        self._events.emit('cluster_state', {
+            'local_node_id': self._cluster_bus._node_id,
+            'peers': peers,
+        })
+
+    # ========== Virtual Stream Handlers (Phase 2.3) ==========
+
+    def _handle_virtual_stream_start(self, msg: dict):
+        """Handle stream_start from a cluster peer — create virtual stream with local-only targets."""
+        node_id = msg['node_id']
+        stream_id = bytes.fromhex(msg['stream_id'])
+        slot = msg['slot']
+        dst_id = msg['dst_id'].to_bytes(3, 'big')
+        rf_src = msg['rf_src'].to_bytes(3, 'big')
+        call_type = msg.get('call_type', 'group')
+        source_rpt = msg.get('source_repeater', 0)
+
+        key = (node_id, stream_id)
+        if key in self._virtual_streams:
+            return  # Duplicate stream_start
+
+        # Calculate local-only targets (single-hop rule: never re-forward to cluster/outbound)
+        targets = self._calculate_stream_targets(
+            b'\x00\x00\x00\x00', slot, dst_id, stream_id, rf_src, local_only=True
+        )
+
+        vs = StreamState(
+            repeater_id=b'\x00\x00\x00\x00',
+            rf_src=rf_src,
+            dst_id=dst_id,
+            slot=slot,
+            start_time=time(),
+            last_seen=time(),
+            stream_id=stream_id,
+            call_type=call_type,
+            target_repeaters=targets,
+            routing_cached=True,
+            source_node=node_id
+        )
+        self._virtual_streams[key] = vs
+        LOGGER.info(f'Virtual stream from {node_id}: slot={slot}, src={msg["rf_src"]}, '
+                    f'dst={msg["dst_id"]}, source_rpt={source_rpt}, local_targets={len(targets)}')
+
+    def _handle_virtual_stream_data(self, msg: dict):
+        """Handle binary stream data from cluster peer — forward to local repeaters only."""
+        node_id = msg['node_id']
+        payload = msg['payload']  # 4B stream_id + 55B DMRD
+        if len(payload) < 59:
+            return
+
+        stream_id = payload[:4]
+        dmrd_data = payload[4:]
+
+        key = (node_id, stream_id)
+        vs = self._virtual_streams.get(key)
+        if not vs:
+            return  # No stream_start received or already ended
+
+        vs.last_seen = time()
+        vs.packet_count += 1
+
+        # Terminator detection
+        _bits = dmrd_data[15] if len(dmrd_data) > 15 else 0
+        _frame_type = (_bits & 0x30) >> 4
+        is_terminator = self._is_dmr_terminator(dmrd_data, _frame_type)
+
+        # Forward to local targets
+        rf_src = dmrd_data[5:8]
+        dst_id = dmrd_data[8:11]
+        for target in (vs.target_repeaters or set()):
+            if not isinstance(target, bytes):
+                continue
+            rpt = self._repeaters.get(target)
+            if not rpt:
+                continue
+            self._send_packet(dmrd_data, rpt.sockaddr)
+            self._update_assumed_stream(rpt, vs.slot, rf_src, dst_id,
+                                        stream_id, is_terminator, 0)
+
+        if is_terminator:
+            LOGGER.info(f'Virtual stream from {node_id} ended (terminator): '
+                        f'stream_id={stream_id.hex()}, packets={vs.packet_count}')
+            del self._virtual_streams[key]
+
+    def _handle_virtual_stream_end(self, msg: dict):
+        """Handle stream_end from cluster peer — clean up virtual stream and assumed streams."""
+        node_id = msg['node_id']
+        stream_id_hex = msg.get('stream_id', '')
+        reason = msg.get('reason', 'unknown')
+        if not stream_id_hex:
+            return
+
+        stream_id = bytes.fromhex(stream_id_hex)
+        key = (node_id, stream_id)
+        vs = self._virtual_streams.get(key)
+        if not vs:
+            return
+
+        # End assumed streams on local targets
+        for target in (vs.target_repeaters or set()):
+            if not isinstance(target, bytes):
+                continue
+            rpt = self._repeaters.get(target)
+            if rpt:
+                cs = rpt.get_slot_stream(vs.slot)
+                if cs and cs.stream_id == stream_id and not cs.ended:
+                    self._end_stream(cs, target, vs.slot, time(), reason)
+
+        LOGGER.info(f'Virtual stream from {node_id} ended ({reason}): '
+                    f'stream_id={stream_id_hex}, packets={vs.packet_count}')
+        del self._virtual_streams[key]
 
     async def _broadcast_repeater_up(self, repeater_id: bytes, repeater: 'RepeaterState'):
         """Broadcast repeater_up to all cluster peers."""
@@ -1108,7 +1361,18 @@ class HBProtocol(asyncio.DatagramProtocol):
             stream,
             end_reason
         )
-        
+
+        # Send stream_end to cluster peers (Phase 2.4)
+        if self._cluster_bus and stream.target_repeaters and not stream.source_node:
+            cluster_peers = [t[1] for t in stream.target_repeaters
+                             if isinstance(t, tuple) and t[0] == 'cluster']
+            if cluster_peers:
+                asyncio.ensure_future(
+                    self._cluster_bus.send_stream_end(
+                        cluster_peers, stream.stream_id.hex(), end_reason
+                    )
+                )
+
         # Decrement active calls counter if this was an assumed (TX) stream
         if stream.is_assumed:
             self._active_calls -= 1
@@ -1342,6 +1606,22 @@ class HBProtocol(asyncio.DatagramProtocol):
                                                    current_time, stream_timeout, hang_time):
                     outbound.slot2_stream = None
 
+        # Cleanup stale virtual streams (no data for > stream_timeout)
+        stale_vs = [k for k, vs in self._virtual_streams.items()
+                    if (current_time - vs.last_seen) > stream_timeout]
+        for key in stale_vs:
+            vs = self._virtual_streams[key]
+            for target in (vs.target_repeaters or set()):
+                if isinstance(target, bytes):
+                    rpt = self._repeaters.get(target)
+                    if rpt:
+                        cs = rpt.get_slot_stream(vs.slot)
+                        if cs and cs.stream_id == vs.stream_id and not cs.ended:
+                            self._end_stream(cs, target, vs.slot, current_time, 'timeout')
+            LOGGER.info(f'Virtual stream from {key[0]} timed out: stream_id={key[1].hex()}, '
+                        f'packets={vs.packet_count}')
+            del self._virtual_streams[key]
+
         # Cleanup old denied stream entries (older than 10 seconds)
         denied_cutoff = current_time - 10.0
         self._denied_streams = {k: v for k, v in self._denied_streams.items() if v > denied_cutoff}
@@ -1381,6 +1661,9 @@ class HBProtocol(asyncio.DatagramProtocol):
                     'slot2_talkgroups': self._format_tg_json(outbound.slot2_talkgroups)
                 })
             
+            # Send cluster state if clustering is enabled
+            self._emit_cluster_state()
+
             LOGGER.info(f'📤 Sent initial state: {len([r for r in self._repeaters.values() if r.connected])} connected repeaters, {len(self._outbounds)} outbound connections')
         except Exception as e:
             LOGGER.error(f'Error sending initial state: {e}')
@@ -1581,6 +1864,10 @@ class HBProtocol(asyncio.DatagramProtocol):
             if _command == DMRD:
                 self._handle_dmr_data(data, addr)
             elif _command == RPTL:
+                if self._draining:
+                    LOGGER.info(f'Rejecting RPTL from {ip}:{port} — server is draining')
+                    self._send_nak(repeater_id, addr, reason="Server draining")
+                    return
                 LOGGER.debug(f'Received RPTL from {ip}:{port} - Repeater Login Request')
                 self._handle_repeater_login(repeater_id, addr)
             elif len(data) == 4:  # Special case: raw repeater ID login
@@ -1752,7 +2039,23 @@ class HBProtocol(asyncio.DatagramProtocol):
         target_repeaters = self._calculate_stream_targets(
             repeater.repeater_id, slot, dst_id, stream_id, rf_src
         )
-        
+
+        # Send stream_start to cluster peers (Phase 2.4)
+        if self._cluster_bus:
+            cluster_peers = [t[1] for t in target_repeaters
+                             if isinstance(t, tuple) and t[0] == 'cluster']
+            if cluster_peers:
+                asyncio.ensure_future(self._cluster_bus.send_stream_start(
+                    cluster_peers, {
+                        'stream_id': stream_id.hex(),
+                        'slot': slot,
+                        'dst_id': int.from_bytes(dst_id, 'big'),
+                        'rf_src': int.from_bytes(rf_src, 'big'),
+                        'call_type': "private" if call_type_bit else "group",
+                        'source_repeater': rid_to_int(repeater.repeater_id),
+                    }
+                ))
+
         # No active stream, start a new one with routing cache
         new_stream = StreamState(
             repeater_id=repeater.repeater_id,
@@ -2314,24 +2617,30 @@ class HBProtocol(asyncio.DatagramProtocol):
         """DMR terminator detection - delegated to protocol module"""
         return is_dmr_terminator(data, frame_type)
     
-    def _calculate_stream_targets(self, source_repeater_id: bytes, slot: int, 
-                                  dst_id: bytes, stream_id: bytes, rf_src: bytes) -> set:
+    def _calculate_stream_targets(self, source_repeater_id: bytes, slot: int,
+                                  dst_id: bytes, stream_id: bytes, rf_src: bytes,
+                                  local_only: bool = False) -> set:
         """
         Calculate which repeaters AND outbound connections should receive this ENTIRE transmission.
-        
+
         Checks both routing rules AND current slot availability at stream start.
         If a slot is busy now, that target is excluded from THIS transmission,
         but will be reconsidered for the NEXT transmission.
-        
+
         This "calculate once per stream" approach provides:
         - Better UX: No partial transmissions (don't join mid-stream)
         - Better performance: No per-packet routing checks
         - Simpler code: Deterministic routing per transmission
-        
+
+        Args:
+            local_only: If True, only calculate local repeater targets (used for
+                       virtual streams from cluster peers — single-hop rule)
+
         Returns:
             Set of target identifiers:
             - repeater_ids (bytes) for local repeaters
             - ('outbound', name) tuples for outbound connections
+            - ('cluster', node_id) tuples for cluster peers
         """
         target_set = set()
         
@@ -2359,48 +2668,68 @@ class HBProtocol(asyncio.DatagramProtocol):
             # Passed all checks - will receive entire transmission
             target_set.add(target_repeater_id)
         
-        # Calculate outbound connection targets
-        for conn_name, outbound in self._outbounds.items():
-            # Only forward to authenticated connections
-            if not outbound.authenticated:
-                continue
-            
-            # Check TG routing (is this TG allowed on this outbound connection?)
-            allowed_tgs = outbound.slot1_talkgroups if slot == 1 else outbound.slot2_talkgroups
-            
-            # None = allow all, empty set = deny all, non-empty set = specific TGs
-            if allowed_tgs is not None and (not allowed_tgs or dst_id not in allowed_tgs):
-                continue
-            
-            # Check TDMA slot availability - outbound connections are like repeaters
-            # Each slot can only carry ONE talkgroup stream at a time (air interface constraint)
-            current_stream = outbound.get_slot_stream(slot)
-            if current_stream:
-                # Same stream continuing
-                if current_stream.stream_id == stream_id:
-                    pass  # Same stream, ok to continue
-                # Different stream - check if in hang time or still active
-                elif current_stream.ended:
-                    # Stream ended, check hang time (protects TG conversations)
-                    hang_time = CONFIG.get('global', {}).get('stream_hang_time', 10.0)
-                    time_since_end = time() - current_stream.end_time if current_stream.end_time else 0
-                    if time_since_end < hang_time:
-                        # In hang time - only allow same TG or original user
-                        same_tg = (current_stream.dst_id == dst_id)
-                        same_user = (current_stream.rf_src == rf_src)
-                        if not (same_tg or same_user):
-                            LOGGER.debug(f'Outbound {conn_name} TS{slot} in hang time, '
-                                       f'excluded from this transmission')
-                            continue
-                else:
-                    # Different active stream - slot is busy
-                    LOGGER.debug(f'Outbound {conn_name} TS{slot} busy with different stream, '
-                               f'excluded from this transmission')
+        if not local_only:
+            # Calculate outbound connection targets
+            for conn_name, outbound in self._outbounds.items():
+                # Only forward to authenticated connections
+                if not outbound.authenticated:
                     continue
-            
-            # Passed all checks - will receive entire transmission
-            target_set.add(('outbound', conn_name))
-        
+
+                # Check TG routing (is this TG allowed on this outbound connection?)
+                allowed_tgs = outbound.slot1_talkgroups if slot == 1 else outbound.slot2_talkgroups
+
+                # None = allow all, empty set = deny all, non-empty set = specific TGs
+                if allowed_tgs is not None and (not allowed_tgs or dst_id not in allowed_tgs):
+                    continue
+
+                # Check TDMA slot availability - outbound connections are like repeaters
+                # Each slot can only carry ONE talkgroup stream at a time (air interface constraint)
+                current_stream = outbound.get_slot_stream(slot)
+                if current_stream:
+                    # Same stream continuing
+                    if current_stream.stream_id == stream_id:
+                        pass  # Same stream, ok to continue
+                    # Different stream - check if in hang time or still active
+                    elif current_stream.ended:
+                        # Stream ended, check hang time (protects TG conversations)
+                        hang_time = CONFIG.get('global', {}).get('stream_hang_time', 10.0)
+                        time_since_end = time() - current_stream.end_time if current_stream.end_time else 0
+                        if time_since_end < hang_time:
+                            # In hang time - only allow same TG or original user
+                            same_tg = (current_stream.dst_id == dst_id)
+                            same_user = (current_stream.rf_src == rf_src)
+                            if not (same_tg or same_user):
+                                LOGGER.debug(f'Outbound {conn_name} TS{slot} in hang time, '
+                                           f'excluded from this transmission')
+                                continue
+                    else:
+                        # Different active stream - slot is busy
+                        LOGGER.debug(f'Outbound {conn_name} TS{slot} busy with different stream, '
+                                   f'excluded from this transmission')
+                        continue
+
+                # Passed all checks - will receive entire transmission
+                target_set.add(('outbound', conn_name))
+
+            # Calculate cluster peer targets (Phase 2.1)
+            # Route to servers, not individual repeaters — break after first match per peer
+            if self._cluster_bus:
+                dst_id_int = int.from_bytes(dst_id, 'big')
+                for peer_node_id, peer_repeaters in self._cluster_state.items():
+                    if not self._cluster_bus.is_peer_alive(peer_node_id):
+                        continue
+                    if peer_node_id in self._draining_peers:
+                        continue
+                    for _rid, rpt_info in peer_repeaters.items():
+                        tg_list = rpt_info.get(f'slot{slot}_talkgroups')
+                        if tg_list is None:
+                            # None = allow all TGs on this slot
+                            target_set.add(('cluster', peer_node_id))
+                            break
+                        if dst_id_int in tg_list:
+                            target_set.add(('cluster', peer_node_id))
+                            break
+
         return target_set
     
     def _forward_stream(self, data: bytes, source_repeater_id: bytes, slot: int, 
@@ -2445,45 +2774,57 @@ class HBProtocol(asyncio.DatagramProtocol):
         is_terminator = self._is_dmr_terminator(data, _frame_type)
         
         # Simple loop through cached targets - no per-packet checks!
+        cluster_targets = []
         for target in source_stream.target_repeaters:
-            # Check if target is an outbound connection or local repeater
+            # Check if target is an outbound connection, cluster peer, or local repeater
             if isinstance(target, tuple) and target[0] == 'outbound':
                 # Target is an outbound connection (we're acting as a repeater to remote server)
                 conn_name = target[1]
                 outbound = self._outbounds.get(conn_name)
                 if not outbound or not outbound.authenticated:
                     continue  # Connection dropped mid-stream
-                
+
                 # CRITICAL: Rewrite repeater ID in DMRD packet (bytes 11-14)
                 # The remote server only knows us as our outbound radio_id, not the source repeater
                 # Must modify packet to replace source repeater ID with our outbound connection ID
                 modified_data = bytearray(data)
                 our_id_bytes = outbound.config.radio_id.to_bytes(4, 'big')
                 modified_data[11:15] = our_id_bytes
-                
+
                 # Forward modified packet to outbound server
                 outbound.transport.sendto(bytes(modified_data))
-                
+
                 # Track assumed stream state on outbound slot (TDMA constraint)
                 # We must track what we're transmitting on each timeslot
-                self._update_assumed_stream_outbound(outbound, slot, rf_src, dst_id, 
+                self._update_assumed_stream_outbound(outbound, slot, rf_src, dst_id,
                                                     stream_id, is_terminator,
                                                     int.from_bytes(source_repeater_id, 'big'))
-                
+
+            elif isinstance(target, tuple) and target[0] == 'cluster':
+                # Collect cluster targets for async send after loop
+                cluster_targets.append(target[1])
+
             else:
                 # Target is a local repeater (bytes)
                 target_repeater_id = target
                 target_repeater = self._repeaters.get(target_repeater_id)
                 if not target_repeater:
                     continue  # Repeater disconnected mid-stream
-                
+
                 # Forward packet (no routing or slot checks - already approved!)
                 self._send_packet(data, target_repeater.sockaddr)
-                
+
                 # Track assumed stream state on target repeater
-                self._update_assumed_stream(target_repeater, slot, rf_src, dst_id, 
-                                           stream_id, is_terminator, 
+                self._update_assumed_stream(target_repeater, slot, rf_src, dst_id,
+                                           stream_id, is_terminator,
                                            int.from_bytes(source_repeater_id, 'big'))
+
+        # Forward to cluster peers via async path (Phase 2.4)
+        if cluster_targets and self._cluster_bus:
+            payload = stream_id + data  # 4B stream_id + 55B DMRD
+            asyncio.ensure_future(
+                self._cluster_bus.send_stream_data(cluster_targets, payload)
+            )
     
     # ================================
     # DMR Packet Processing
@@ -2854,14 +3195,15 @@ async def async_main():
     # Setup signal handlers (Linux/Unix native asyncio pattern)
     shutdown_event = asyncio.Event()
     
-    def handle_shutdown(signum):
+    async def async_shutdown(signum):
         signame = signal.Signals(signum).name
         LOGGER.info(f"Received shutdown signal {signame}")
-        # Cleanup all protocols (cleanup() logs "Starting graceful shutdown...")
         for protocol in protocols:
-            protocol.cleanup()
-        # Signal the event loop to exit
+            await protocol.graceful_shutdown()
         shutdown_event.set()
+
+    def handle_shutdown(signum):
+        asyncio.ensure_future(async_shutdown(signum))
     
     loop.add_signal_handler(signal.SIGINT, lambda: handle_shutdown(signal.SIGINT))
     loop.add_signal_handler(signal.SIGTERM, lambda: handle_shutdown(signal.SIGTERM))

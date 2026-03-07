@@ -113,6 +113,7 @@ class DashboardState:
         self.last_heard: List[dict] = []  # Last heard users
         self.last_heard_stats: dict = {}  # User cache statistics
         self.websocket_clients: Set[WebSocket] = set()
+        self.cluster: dict = {}  # Cluster state: {local_node_id, peers: [...]}
         self.hblink_connected: bool = False  # Track HBlink4 connection status
         self.stats = {
             'total_calls_today': 0,      # Total RX calls (streams) received today
@@ -848,9 +849,10 @@ class EventReceiver:
                     'last_error': event['timestamp']
                 }
             logger.warning(f"Outbound connection error: {conn_name} - {data.get('error_message', 'Unknown error')}")
-        
+        elif event_type == 'cluster_state':
+            state.cluster = data
 
-        
+
         # Add to event log (only for user-facing on-air activity events)
         # Skip system events like repeater_connected, repeater_disconnected, hang_time_expired, repeater_keepalive
         # Skip TX/assumed streams from the events log (but they're still tracked in state.streams for repeater cards)
@@ -923,6 +925,12 @@ async def get_stats():
         "repeaters_connected": len([r for r in state.repeaters.values() if r.get('status') == 'connected']),
         "active_streams": len([s for s in state.streams.values() if s.get('status') == 'active'])
     }
+
+
+@app.get("/api/cluster")
+async def get_cluster():
+    """Get cluster state: peers, latency, repeater counts"""
+    return state.cluster or {}
 
 
 @app.get("/api/repeater/{repeater_id}")
@@ -1053,6 +1061,7 @@ async def websocket_endpoint(websocket: WebSocket):
             'events': list(state.events)[-50:],
             'stats': state.stats,
             'last_heard': state.last_heard,
+            'cluster': state.cluster,
             'hblink_connected': state.hblink_connected
         }
     })

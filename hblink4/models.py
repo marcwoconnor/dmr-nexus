@@ -88,6 +88,7 @@ class StreamState:
     is_assumed: bool = False  # True if this is an assumed stream (forwarded to target, not received from it)
     target_repeaters: Optional[set] = None  # Cached set of repeater_ids approved for forwarding
     routing_cached: bool = False  # True once routing has been calculated
+    source_node: Optional[str] = None  # Cluster node_id that originated this stream (None = local)
     
     def is_active(self, timeout: float = 2.0) -> bool:
         """Check if stream is still active (within timeout period)"""

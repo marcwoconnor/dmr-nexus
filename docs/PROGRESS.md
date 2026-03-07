@@ -49,6 +49,107 @@ The hot path avoids JSON serialization: 1B type + 4B stream_id + 55B DMRD = 60 b
 
 ---
 
+---
+
+### Completed: Phase 2.1-2.4 (Cross-Server Stream Routing)
+
+The core clustering value: DMR transmissions now cross server boundaries.
+
+#### Modified Files
+| File | Changes |
+|------|---------|
+| `hblink4/models.py` | Added `source_node` field to StreamState |
+| `hblink4/cluster.py` | Added `send_stream_start()`, `send_stream_data()`, `send_stream_end()` helpers |
+| `hblink4/hblink.py` | Target calc cluster loop, `local_only` param, virtual stream handlers, cluster forwarding in `_forward_stream`, stream_end cluster notification, peer disconnect virtual stream cleanup |
+| `tests/test_cluster.py` | 19 new tests: target calc (8), virtual streams (7), stream protocol over TCP (4) |
+
+#### Sub-phase Details
+- **2.1 Target Calculation** — `_calculate_stream_targets()` now loops cluster state, matches TG+slot per remote repeater, breaks on first match per peer
+- **2.2 Cluster Stream Protocol** — JSON `stream_start`/`stream_end`, binary `stream_data` (4B stream_id + 55B DMRD = hot path)
+- **2.3 Virtual Stream Reception** — incoming cluster streams create virtual StreamState, calculate LOCAL-ONLY targets (single-hop rule), forward DMRD to local repeaters, track assumed streams
+- **2.4 Stream Lifecycle Integration** — `_forward_stream()` collects cluster targets and sends via `asyncio.ensure_future()`, `_end_stream()` notifies cluster peers, peer disconnect cleans up virtual streams
+
+#### Test Results
+- **113 tests total, 113 passing, 0 failures**
+- 19 new Phase 2 tests + 12 Phase 1 cluster tests + 82 existing tests
+
+#### Architecture Insights
+
+**Sync/Async Bridge.** `_forward_stream()` is sync (called from `datagram_received` UDP callback) but cluster sends are async (TCP). `asyncio.ensure_future()` bridges the gap — the UDP callback doesn't block, TCP writes buffer in the kernel. For the hot path (~60ms DMR frame intervals), this avoids per-packet coroutine overhead on the UDP side.
+
+**Single-Hop Rule.** Virtual streams from cluster peers forward to local repeaters ONLY — never re-forwarded to other cluster peers or outbound connections. This prevents routing loops in the mesh. The `local_only=True` flag on `_calculate_stream_targets()` enforces this.
+
+**Virtual Stream Keying.** `(node_id, stream_id_bytes)` prevents stream ID collisions — different nodes can independently generate the same 4-byte stream ID. The binary hot path uses raw bytes for the key (no hex conversion on every packet).
+
+**Redundant Stream ID.** The binary wire format duplicates stream_id: once as a 4-byte prefix (for O(1) lookup without parsing the DMRD), and again inside the 55-byte DMRD at bytes 16-20. This is intentional — the hot path reads 4 bytes from the front rather than seeking to byte 16.
+
+---
+
+---
+
+### Completed: Phase 3.2 (Failure Detection) + Phase 3.3 (Graceful Shutdown)
+
+Resilience layer: dead peer cleanup, stale virtual stream timeout, ordered shutdown with drain.
+
+#### Modified Files
+| File | Changes |
+|------|---------|
+| `hblink4/hblink.py` | `_draining` flag, `_draining_peers` set, RPTL rejection during drain, skip draining peers in target calc, virtual stream stale cleanup in `_check_stream_timeouts`, async `graceful_shutdown()` replacing sync `cleanup()`, `node_draining`/`node_down` cluster message handlers, `_count_active_streams()`, async signal handler |
+| `tests/test_cluster.py` | 8 new tests: draining exclusion (2), virtual stream timeout (2), graceful shutdown broadcast ordering (1), node_draining/node_down handlers (3) |
+
+#### Sub-phase Details
+- **3.2 Failure Detection**: Virtual stream stale cleanup in periodic `_check_stream_timeouts()` — streams with no data for > `stream_timeout` are removed and assumed streams on targets are ended. Peer disconnect already handled (Phase 2).
+- **3.3 Graceful Shutdown**: Ordered sequence: set `_draining` → broadcast `node_draining` → wait for active streams (configurable `drain_timeout`, default 30s) → send MSTCL to repeaters → broadcast `node_down` → stop cluster bus. Peers receiving `node_draining` skip that peer in target calculations. Signal handler now async.
+
+#### Test Results
+- **121 tests total, 121 passing, 0 failures**
+- 8 new Phase 3 tests + 19 Phase 2 tests + 12 Phase 1 cluster tests + 82 existing tests
+
+#### Architecture Insights
+
+**Drain vs. Kill.** The old `cleanup()` was immediate: send MSTCL, done. The new `graceful_shutdown()` is ordered — it waits for active streams to finish before disconnecting repeaters. For ham radio, this means a QSO in progress won't get cut off during a rolling restart. The drain timeout prevents hanging forever if a stream never ends.
+
+**Draining Peer Exclusion.** When a peer broadcasts `node_draining`, other servers stop routing NEW streams to it. Existing streams continue (the draining peer still processes them). This is Option A from the design discussion — simple, no mid-stream disruption.
+
+**Stale Virtual Stream Cleanup.** If a peer dies without sending `stream_end` (crash, network partition), the periodic `_check_stream_timeouts` catches virtual streams that haven't received data within `stream_timeout` (default 2s). This prevents unbounded memory growth from orphaned virtual streams.
+
+---
+
+---
+
+### Completed: Phase 1.3 (User Cache Sharing)
+
+Cross-server user cache: local user_heard events are batched, throttled, and broadcast to cluster peers.
+
+#### Modified Files
+| File | Changes |
+|------|---------|
+| `hblink4/user_cache.py` | `source_node` field on UserEntry, broadcast callback + queue, throttled `flush_broadcast()`, `merge_remote()`, `set_broadcast_callback()`, cleanup flushes queue |
+| `hblink4/hblink.py` | `user_heard` cluster message handler, broadcast callback wired up on cluster bus start |
+| `tests/test_cluster.py` | 12 new tests: source_node tracking, broadcast queue/throttle/batch, merge_remote, local-overwrites-remote, to_dict |
+
+#### Test Results
+- **133 tests total, 133 passing, 0 failures**
+
+---
+
+### Completed: Phase 1.4 + 4.2 (Dashboard Cluster View)
+
+Backend plumbing for cluster visibility in the dashboard.
+
+#### Modified Files
+| File | Changes |
+|------|---------|
+| `hblink4/hblink.py` | `_emit_cluster_state()` helper, 8 call sites (peer connect/disconnect, sync_state, repeater_up/down, node_draining/down, _send_initial_state) |
+| `dashboard/server.py` | `DashboardState.cluster` field, `cluster_state` event handler, `cluster` in WebSocket initial_state, `/api/cluster` REST endpoint |
+| `tests/test_cluster.py` | 5 new tests: emit output, draining flag, noop without bus, zero repeaters, dashboard storage |
+
+#### Test Results
+- **138 tests total, 138 passing, 0 failures**
+- 5 new Phase 1.4 tests + 46 prior cluster tests + 87 existing tests
+
+---
+
 ### What's Next
 
 Per the recommended implementation order:
@@ -56,11 +157,10 @@ Per the recommended implementation order:
 | Order | Phase | Status |
 |-------|-------|--------|
 | 1 | 1.1 + 1.2 (Cluster Bus + State Advertisement) | **DONE** |
-| 2 | 2.1 - 2.4 (Cross-Server Stream Routing) | Next |
-| 3 | 3.2 + 3.3 (Failure Detection + Graceful Shutdown) | Pending |
-| 4 | 1.3 (User Cache Sharing) | Pending |
-| 5 | 3.1 (DNS/Config Failover Docs) | Pending |
-| 6 | 1.4 + 4.2 (Dashboard Cluster View) | Pending |
-| 7+ | Phases 4-6 | Pending |
-
-Phase 2 is the core value — transmissions crossing server boundaries. The cluster bus infrastructure from Phase 1.1/1.2 provides the transport; Phase 2 adds the routing logic.
+| 2 | 2.1 - 2.4 (Cross-Server Stream Routing) | **DONE** |
+| 3 | 3.2 + 3.3 (Failure Detection + Graceful Shutdown) | **DONE** |
+| 4 | 1.3 (User Cache Sharing) | **DONE** |
+| 5 | 3.1 (DNS/Config Failover Docs) | **DONE** |
+| 6 | 1.4 + 4.2 (Dashboard Cluster View) | **DONE** |
+| 7 | 4.1 + 4.3 (Config Hot-Reload + Management Commands) | Next |
+| 8+ | Phases 5-6 | Pending |

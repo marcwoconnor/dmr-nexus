@@ -207,6 +207,26 @@ class ClusterBus:
             }
         return result
 
+    async def send_stream_start(self, node_ids: list, stream_info: dict):
+        """Send stream_start JSON to specific cluster peers."""
+        stream_info['type'] = 'stream_start'
+        for node_id in node_ids:
+            await self.send(node_id, stream_info)
+
+    async def send_stream_data(self, node_ids: list, payload: bytes):
+        """Send binary stream data (hot path) to specific cluster peers."""
+        for node_id in node_ids:
+            await self.send_binary(node_id, MSG_TYPE_STREAM_DATA, payload)
+
+    async def send_stream_end(self, node_ids: list, stream_id_hex: str, reason: str):
+        """Send stream_end to specific cluster peers."""
+        data = json.dumps({'stream_id': stream_id_hex, 'reason': reason},
+                          separators=(',', ':')).encode('utf-8')
+        for node_id in node_ids:
+            peer = self._peers.get(node_id)
+            if peer and peer.connected and peer.authenticated:
+                await self._send_raw(peer, MSG_TYPE_STREAM_END, data)
+
     @property
     def connected_peers(self) -> List[str]:
         """List of connected and authenticated peer node_ids."""
