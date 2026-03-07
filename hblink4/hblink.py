@@ -19,6 +19,7 @@ from typing import Dict, Any, Optional, Tuple, Union, List, Set
 from time import time
 from random import randint
 from hashlib import sha256
+import hmac
 import re
 
 import signal
@@ -42,6 +43,8 @@ try:
     from .events import EventEmitter
     from .user_cache import UserCache
     from .cluster import ClusterBus
+    from .cluster_protocol import NATIVE_MAGIC, TokenManager, Token, CMD_AUTH, CMD_SUBSCRIBE, CMD_PING, CMD_DATA, CMD_DISCONNECT, CMD_AUTH_ACK, CMD_AUTH_NAK, CMD_SUB_ACK, CMD_PONG
+    from .subscriptions import SubscriptionStore
     from .utils import (
         safe_decode_bytes, normalize_addr, rid_to_int, bytes_to_int,
         cleanup_old_logs, setup_logging, PeerAddress, detect_connection_type
@@ -64,6 +67,8 @@ except ImportError:
     from events import EventEmitter
     from user_cache import UserCache
     from cluster import ClusterBus
+    from cluster_protocol import NATIVE_MAGIC, TokenManager, Token, CMD_AUTH, CMD_SUBSCRIBE, CMD_PING, CMD_DATA, CMD_DISCONNECT, CMD_AUTH_ACK, CMD_AUTH_NAK, CMD_SUB_ACK, CMD_PONG
+    from subscriptions import SubscriptionStore
     from utils import (
         safe_decode_bytes, normalize_addr, rid_to_int, bytes_to_int,
         cleanup_old_logs, setup_logging, PeerAddress, detect_connection_type
@@ -167,6 +172,14 @@ class HBProtocol(asyncio.DatagramProtocol):
         # Graceful shutdown state (Phase 3.3)
         self._draining = False
         self._draining_peers: Set[str] = set()  # Cluster peers that are draining
+
+        # Cluster-native protocol (Phase 5.1+5.2)
+        cluster_id = cluster_config.get('node_id', 'default') if cluster_config.get('enabled') else 'standalone'
+        native_secret = cluster_config.get('shared_secret', CONFIG.get('global', {}).get('passphrase', ''))
+        self._token_manager = TokenManager(native_secret, cluster_id)
+        self._subscriptions = SubscriptionStore()
+        # Native client sessions: addr -> {token_hash, repeater_id, last_ping}
+        self._native_clients: Dict[tuple, dict] = {}
 
         # No conversion caching - simple int.from_bytes() is fast enough
         # and avoids unbounded cache growth (memory leak prevention)
@@ -957,6 +970,174 @@ class HBProtocol(asyncio.DatagramProtocol):
         if hasattr(self, '_events') and self._events:
             self._events.close()
             
+    # ========== NATIVE PROTOCOL HANDLERS (Phase 5.1+5.2) ==========
+
+    def _handle_native_packet(self, data: bytes, addr: tuple):
+        """Handle a cluster-native protocol packet (CLNT prefix)."""
+        if len(data) < 8:
+            return  # Too short
+
+        sub_cmd = data[4:8]
+
+        if sub_cmd == CMD_AUTH:
+            self._handle_native_auth(data, addr)
+        elif sub_cmd == CMD_SUBSCRIBE:
+            self._handle_native_subscribe(data, addr)
+        elif sub_cmd == CMD_PING:
+            self._handle_native_ping(data, addr)
+        elif sub_cmd == CMD_DATA:
+            self._handle_native_data(data, addr)
+        elif sub_cmd == CMD_DISCONNECT:
+            self._handle_native_disconnect(data, addr)
+        else:
+            LOGGER.warning(f'Unknown native sub-command from {addr[0]}:{addr[1]}: {sub_cmd}')
+
+    def _handle_native_auth(self, data: bytes, addr: tuple):
+        """Handle AUTH request: verify credentials, issue token."""
+        # AUTH format: CLNT + AUTH + 4B repeater_id + passphrase_hash
+        if len(data) < 12:
+            self._send_packet(NATIVE_MAGIC + CMD_AUTH_NAK + b'too short', addr)
+            return
+
+        if self._draining:
+            self._send_packet(NATIVE_MAGIC + CMD_AUTH_NAK + b'draining', addr)
+            return
+
+        repeater_id_bytes = data[8:12]
+        rid_int = int.from_bytes(repeater_id_bytes, 'big')
+        passphrase_hash = data[12:]  # Client sends SHA256(passphrase)
+
+        # Look up config for this repeater
+        try:
+            repeater_config = self._matcher.get_repeater_config(rid_int)
+        except Exception:
+            self._send_packet(NATIVE_MAGIC + CMD_AUTH_NAK + b'blacklisted', addr)
+            return
+
+        if repeater_config is None:
+            self._send_packet(NATIVE_MAGIC + CMD_AUTH_NAK + b'no config', addr)
+            return
+
+        # Verify passphrase: client sends SHA256(passphrase), we compare
+        from hashlib import sha256
+        expected_hash = sha256(repeater_config.passphrase.encode()).digest()
+        if not hmac.compare_digest(passphrase_hash[:32], expected_hash):
+            LOGGER.warning(f'Native auth failed for {rid_int} from {addr[0]}:{addr[1]}')
+            self._send_packet(NATIVE_MAGIC + CMD_AUTH_NAK + b'auth failed', addr)
+            return
+
+        # Issue token
+        token = self._token_manager.issue_token(
+            rid_int,
+            repeater_config.slot1_talkgroups,
+            repeater_config.slot2_talkgroups,
+        )
+        token_bytes = token.to_bytes()
+
+        # Track client session
+        self._native_clients[addr] = {
+            'token_hash': token.token_hash,
+            'repeater_id': rid_int,
+            'last_ping': time(),
+        }
+
+        # Send token
+        self._send_packet(NATIVE_MAGIC + CMD_AUTH_ACK + token_bytes, addr)
+        LOGGER.info(f'Native auth OK: repeater {rid_int} from {addr[0]}:{addr[1]}')
+
+    def _handle_native_subscribe(self, data: bytes, addr: tuple):
+        """Handle SUBSCRIBE: client declares desired TGs."""
+        # SUBSCRIBE format: CLNT + SUBS + 4B token_hash + subscription_json
+        if len(data) < 12:
+            return
+
+        token_hash = data[8:12]
+        token = self._token_manager.validate_token_hash(token_hash)
+        if not token:
+            LOGGER.warning(f'Native subscribe with invalid token from {addr[0]}:{addr[1]}')
+            return
+
+        try:
+            sub_json = json.loads(data[12:].decode('utf-8'))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        sub = self._subscriptions.subscribe(
+            repeater_id=token.repeater_id,
+            slot1_requested=sub_json.get('slot1'),
+            slot2_requested=sub_json.get('slot2'),
+            slot1_allowed=token.slot1_talkgroups,
+            slot2_allowed=token.slot2_talkgroups,
+        )
+
+        self._send_packet(NATIVE_MAGIC + CMD_SUB_ACK + json.dumps(
+            sub.to_dict(), separators=(',', ':')).encode(), addr)
+
+    def _handle_native_ping(self, data: bytes, addr: tuple):
+        """Handle PING: respond with PONG + cluster health."""
+        if len(data) < 12:
+            return
+
+        token_hash = data[8:12]
+        token = self._token_manager.validate_token_hash(token_hash)
+        if not token:
+            return
+
+        # Update last ping
+        client = self._native_clients.get(addr)
+        if client:
+            client['last_ping'] = time()
+
+        # Build cluster health info
+        health = {}
+        if self._cluster_bus:
+            peers = self._cluster_bus.get_peer_states()
+            health = {
+                'peers': [{
+                    'node_id': nid,
+                    'alive': ps['alive'],
+                    'latency_ms': ps['latency_ms'],
+                } for nid, ps in peers.items()],
+            }
+
+        self._send_packet(NATIVE_MAGIC + CMD_PONG + json.dumps(
+            health, separators=(',', ':')).encode(), addr)
+
+    def _handle_native_data(self, data: bytes, addr: tuple):
+        """Handle DATA: native client sending DMR data.
+
+        DATA format: CLNT(4B) + DATA(4B) + token_hash(4B) + DMRD_payload(53B)
+        The 53-byte payload is the HomeBrew DMRD content after the 'DMRD' prefix
+        (seqno + src + dst + repeater_id + slot_info + stream_id + dmr_data).
+        We prepend DMRD to reconstruct a standard HomeBrew packet for the
+        existing handler.
+        """
+        if len(data) < 12 + 53:
+            return
+
+        token_hash = data[8:12]
+        token = self._token_manager.validate_token_hash(token_hash)
+        if not token:
+            return
+
+        # Reconstruct HomeBrew DMRD packet: DMRD(4B) + payload(53B) = 57B
+        # But _handle_dmr_data expects the full packet including DMRD prefix
+        dmrd_payload = data[12:12 + 53]
+        full_packet = DMRD + dmrd_payload
+        self._handle_dmr_data(full_packet, addr)
+
+    def _handle_native_disconnect(self, data: bytes, addr: tuple):
+        """Handle DISCONNECT: client explicitly disconnecting."""
+        if len(data) >= 12:
+            token_hash = data[8:12]
+            token = self._token_manager.validate_token_hash(token_hash)
+            if token:
+                self._subscriptions.unsubscribe(token.repeater_id)
+                LOGGER.info(f'Native client disconnected: repeater {token.repeater_id}')
+
+        if addr in self._native_clients:
+            del self._native_clients[addr]
+
     # ========== CONFIG HOT-RELOAD (Phase 4.1) ==========
 
     def _reload_config(self) -> bool:
@@ -1078,6 +1259,13 @@ class HBProtocol(asyncio.DatagramProtocol):
                     }))
                 self._user_cache.set_broadcast_callback(_broadcast_user_heard)
                 LOGGER.info('User cache cluster broadcast enabled')
+
+            # Wire up subscription broadcast (Phase 5.2)
+            def _broadcast_subscription(msg):
+                msg['node_id'] = self._cluster_bus._node_id
+                asyncio.ensure_future(self._cluster_bus.broadcast(msg))
+            self._subscriptions.set_broadcast_callback(_broadcast_subscription)
+            LOGGER.info('Subscription cluster broadcast enabled')
         except Exception as e:
             LOGGER.error(f'Failed to start cluster bus: {e}', exc_info=True)
 
@@ -1120,6 +1308,7 @@ class HBProtocol(asyncio.DatagramProtocol):
                 count = len(self._cluster_state[node_id])
                 del self._cluster_state[node_id]
                 LOGGER.info(f'Purged {count} remote repeater(s) from {node_id}')
+            self._subscriptions.remove_by_node(node_id)
             self._emit_cluster_state()
 
         elif msg_type == 'sync_request':
@@ -1162,6 +1351,16 @@ class HBProtocol(asyncio.DatagramProtocol):
             LOGGER.warning(f'Cluster peer {node_id} announced shutdown')
             self._emit_cluster_state()
             # State will be purged when TCP disconnects (peer_disconnected)
+
+        elif msg_type == 'subscription_update':
+            sub = msg.get('subscription')
+            if sub:
+                self._subscriptions.merge_remote(sub, msg.get('node_id', 'unknown'))
+
+        elif msg_type == 'subscription_remove':
+            rid = msg.get('repeater_id')
+            if rid is not None:
+                self._subscriptions.remove_remote(rid)
 
     async def _send_cluster_state_to_peer(self, peer_node_id: str):
         """Send all local repeater info to a specific peer (full sync)."""
@@ -1899,9 +2098,15 @@ class HBProtocol(asyncio.DatagramProtocol):
         #LOGGER.debug(f'Raw packet from {ip}:{port}: {data.hex()}')
             
         _command = data[:4]
-        # Per-packet logging - only enable for heavy troubleshooting
-        #LOGGER.debug(f'Command bytes: {_command}')
-        
+
+        # Dual-protocol dispatch (Phase 5.1): native protocol has CLNT magic
+        if _command == NATIVE_MAGIC:
+            try:
+                self._handle_native_packet(data, addr)
+            except Exception as e:
+                LOGGER.error(f'Error handling native packet from {ip}:{port}: {e}')
+            return
+
         try:
             # Extract repeater_id based on packet type
             repeater_id = None

@@ -171,6 +171,28 @@ Live config reload and operational management socket.
 
 ---
 
+### Completed: Phase 5.1 + 5.2 (Token Auth + Subscriptions)
+
+Cluster-native client protocol with stateless token auth and client-driven TG subscriptions.
+
+#### New Files
+| File | Lines | Purpose |
+|------|-------|---------|
+| `hblink4/cluster_protocol.py` | ~200 | Token, TokenManager, HMAC-SHA256 signing, wire format constants |
+| `hblink4/subscriptions.py` | ~160 | SubscriptionStore with config validation, cluster replication |
+| `tests/test_native_protocol.py` | ~240 | 29 tests: tokens (13) + subscriptions (16) |
+
+#### Modified Files
+| File | Changes |
+|------|---------|
+| `hblink4/hblink.py` | Dual-protocol dispatch (CLNT magic), TokenManager+SubscriptionStore init, 6 native handlers (auth/subscribe/ping/data/disconnect), subscription cluster messages, broadcast wiring |
+
+#### Test Results
+- **172 tests total, 172 passing, 0 failures**
+- 29 new Phase 5 tests + 56 prior cluster tests + 87 existing tests
+
+---
+
 ### What's Next
 
 Per the recommended implementation order:
@@ -184,5 +206,6 @@ Per the recommended implementation order:
 | 5 | 3.1 (DNS/Config Failover Docs) | **DONE** |
 | 6 | 1.4 + 4.2 (Dashboard Cluster View) | **DONE** |
 | 7 | 4.1 + 4.3 (Config Hot-Reload + Management Commands) | **DONE** |
-| 8 | 5.1 + 5.2 (Token Auth + Subscriptions) | Next |
-| 9+ | Phases 5-6 | Pending |
+| 8 | 5.1 + 5.2 (Token Auth + Subscriptions) | **DONE** |
+| 9 | 5.4 (HomeBrew Proxy Adapter) | Next |
+| 10+ | Phases 5.3, 5.5, 6.x | Pending |
