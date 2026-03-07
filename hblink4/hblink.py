@@ -1505,6 +1505,19 @@ class HBProtocol(asyncio.DatagramProtocol):
 
     # ========== Virtual Stream Handlers (Phase 2.3) ==========
 
+    def _is_stream_active_locally(self, stream_id: bytes, slot: int) -> bool:
+        """Check if a stream_id is already active on any local repeater.
+
+        Used for multi-connect dedup: if a client sends the same stream to
+        multiple servers, the cluster bus will forward it back. We suppress
+        the virtual stream if we already have the local one.
+        """
+        for rpt in self._repeaters.values():
+            stream = rpt.get_slot_stream(slot)
+            if stream and stream.stream_id == stream_id and not stream.ended:
+                return True
+        return False
+
     def _handle_virtual_stream_start(self, msg: dict):
         """Handle stream_start from a cluster peer — create virtual stream with local-only targets."""
         node_id = msg['node_id']
@@ -1518,6 +1531,14 @@ class HBProtocol(asyncio.DatagramProtocol):
         key = (node_id, stream_id)
         if key in self._virtual_streams:
             return  # Duplicate stream_start
+
+        # Multi-connect dedup (Phase 5.5): if this stream_id is already active
+        # locally (same client connected to us AND to the sending peer), suppress
+        # the virtual stream to prevent duplicate audio on local repeaters
+        if self._is_stream_active_locally(stream_id, slot):
+            LOGGER.info(f'Suppressed duplicate virtual stream {stream_id.hex()} from {node_id} '
+                       f'— already active locally (multi-connect dedup)')
+            return
 
         # Calculate local-only targets (single-hop rule: never re-forward to cluster/outbound)
         targets = self._calculate_stream_targets(
@@ -2400,6 +2421,15 @@ class HBProtocol(asyncio.DatagramProtocol):
         target_repeaters = self._calculate_stream_targets(
             repeater.repeater_id, slot, dst_id, stream_id, rf_src
         )
+
+        # Multi-connect dedup (Phase 5.5): if a virtual stream with the same
+        # stream_id exists (peer forwarded it before our local DMRD arrived),
+        # remove the virtual stream — the local stream takes priority
+        stale_virtual = [k for k, vs in self._virtual_streams.items()
+                         if vs.stream_id == stream_id and vs.slot == slot]
+        for k in stale_virtual:
+            del self._virtual_streams[k]
+            LOGGER.info(f'Removed virtual stream {stream_id.hex()} — local stream takes priority (multi-connect dedup)')
 
         # Send stream_start to cluster peers (Phase 2.4)
         if self._cluster_bus:

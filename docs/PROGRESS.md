@@ -228,6 +228,23 @@ Enhanced PONG response with full cluster health for fast client failover.
 
 ---
 
+### Completed: Phase 5.5 (Multi-Connect Server-Side Dedup)
+
+Server-side stream dedup for clients connected to multiple servers simultaneously.
+
+#### Modified Files
+| File | Changes |
+|------|---------|
+| `hblink4/hblink.py` | `_is_stream_active_locally()`, dedup in `_handle_virtual_stream_start()`, stale virtual cleanup in `_handle_stream_start()` |
+| `tests/test_cluster.py` | 6 new tests: virtual stream suppression (3), `_is_stream_active_locally` (2), stale virtual cleanup (1) |
+
+#### Test Results
+- **209 tests total, 209 passing, 0 failures**
+
+---
+
+---
+
 ### What's Next
 
 Per the recommended implementation order:
@@ -244,4 +261,5 @@ Per the recommended implementation order:
 | 8 | 5.1 + 5.2 (Token Auth + Subscriptions) | **DONE** |
 | 9 | 5.4 (HomeBrew Proxy Adapter) | **DONE** |
 | 10 | 5.3 (Cluster-Aware Keepalive) | **DONE** |
-| 11+ | Phases 5.5, 6.x | Pending (defer until needed) |
+| 11 | 5.5 (Multi-Connect Server-Side Dedup) | **DONE** |
+| 12+ | Phase 6.x (Global Scale) | Pending (defer until >10 nodes) |
