@@ -1524,5 +1524,154 @@ class TestNativeClientForwarding(unittest.TestCase):
         self.assertEqual(sent_pkt[12:], data[4:])  # DMRD body without 'DMRD' prefix
 
 
+# ========== Phase 5.3: Cluster-Aware Keepalive Tests ==========
+
+class TestClusterAwarePong(unittest.TestCase):
+    """PONG response includes cluster health, peer status, and preferred_server."""
+
+    def _make_proto(self):
+        from hblink4.hblink import HBProtocol, CONFIG
+        from hblink4.cluster_protocol import TokenManager
+        CONFIG.clear()
+        CONFIG.update({
+            'global': {
+                'bind_address': '0.0.0.0', 'port': 62030, 'passphrase': 'test',
+                'max_missed_pings': 3, 'ping_time': 5, 'stream_timeout': 2.0,
+                'stream_hang_time': 10.0, 'user_cache_timeout': 300,
+            },
+            'repeater_configurations': {'patterns': []},
+            'blacklist': {'patterns': []},
+            'connection_type_detection': {'categories': {}},
+        })
+        mock = MagicMock(spec=HBProtocol)
+        mock._repeaters = {}
+        mock._native_clients = {}
+        mock._cluster_bus = None
+        mock._cluster_state = {}
+        mock._draining_peers = set()
+        mock._draining = False
+        mock._subscriptions = SubscriptionStore()
+
+        # Real token manager for issuing test tokens
+        tm = TokenManager('test-secret', 'test-cluster')
+        mock._token_manager = tm
+
+        # Bind real methods
+        mock._handle_native_ping = HBProtocol._handle_native_ping.__get__(mock)
+        mock._count_active_streams = HBProtocol._count_active_streams.__get__(mock)
+        return mock, tm
+
+    def _send_ping(self, proto, tm, addr=('10.0.0.5', 50000)):
+        """Issue a token, register client, send ping, return parsed PONG health."""
+        from hblink4.cluster_protocol import NATIVE_MAGIC, CMD_PING
+        token = tm.issue_token(312000, [8], [3120])
+        proto._native_clients[addr] = {
+            'token_hash': token.token_hash,
+            'repeater_id': 312000,
+            'last_ping': time(),
+        }
+        ping_data = NATIVE_MAGIC + CMD_PING + token.token_hash
+        proto._handle_native_ping(ping_data, addr)
+        # Parse PONG response
+        proto._send_packet.assert_called_once()
+        pkt, sent_addr = proto._send_packet.call_args[0]
+        self.assertEqual(sent_addr, addr)
+        health_json = pkt[8:]  # Skip CLNT+PONG
+        return json.loads(health_json)
+
+    def test_pong_includes_node_id(self):
+        """PONG response includes this server's node_id."""
+        proto, tm = self._make_proto()
+        health = self._send_ping(proto, tm)
+        self.assertEqual(health['node_id'], 'standalone')
+
+    def test_pong_includes_node_id_clustered(self):
+        """PONG with cluster bus includes real node_id."""
+        proto, tm = self._make_proto()
+        proto._cluster_bus = MagicMock()
+        proto._cluster_bus._node_id = 'server-1'
+        proto._cluster_bus.get_peer_states.return_value = {}
+        health = self._send_ping(proto, tm)
+        self.assertEqual(health['node_id'], 'server-1')
+
+    def test_pong_includes_active_streams(self):
+        """PONG includes active stream count."""
+        proto, tm = self._make_proto()
+        health = self._send_ping(proto, tm)
+        self.assertEqual(health['active_streams'], 0)
+
+    def test_pong_peer_status_alive(self):
+        """Alive peer shows status='alive'."""
+        proto, tm = self._make_proto()
+        proto._cluster_bus = MagicMock()
+        proto._cluster_bus._node_id = 'server-1'
+        proto._cluster_bus.get_peer_states.return_value = {
+            'server-2': {'alive': True, 'latency_ms': 1.5},
+        }
+        health = self._send_ping(proto, tm)
+        peer = health['peers'][0]
+        self.assertEqual(peer['status'], 'alive')
+        self.assertEqual(peer['latency_ms'], 1.5)
+
+    def test_pong_peer_status_draining(self):
+        """Draining peer shows status='draining'."""
+        proto, tm = self._make_proto()
+        proto._cluster_bus = MagicMock()
+        proto._cluster_bus._node_id = 'server-1'
+        proto._cluster_bus.get_peer_states.return_value = {
+            'server-2': {'alive': True, 'latency_ms': 1.0},
+        }
+        proto._draining_peers = {'server-2'}
+        health = self._send_ping(proto, tm)
+        self.assertEqual(health['peers'][0]['status'], 'draining')
+
+    def test_pong_peer_status_dead(self):
+        """Dead peer shows status='dead'."""
+        proto, tm = self._make_proto()
+        proto._cluster_bus = MagicMock()
+        proto._cluster_bus._node_id = 'server-1'
+        proto._cluster_bus.get_peer_states.return_value = {
+            'server-2': {'alive': False, 'latency_ms': 0},
+        }
+        health = self._send_ping(proto, tm)
+        self.assertEqual(health['peers'][0]['status'], 'dead')
+
+    def test_pong_preferred_server(self):
+        """preferred_server points to lowest-load alive non-draining peer."""
+        proto, tm = self._make_proto()
+        proto._cluster_bus = MagicMock()
+        proto._cluster_bus._node_id = 'server-1'
+        proto._cluster_bus.get_peer_states.return_value = {
+            'server-2': {'alive': True, 'latency_ms': 2.0},
+            'server-3': {'alive': True, 'latency_ms': 3.0},
+        }
+        # server-3 has fewer repeaters (lower load)
+        proto._cluster_state = {
+            'server-2': {1: {}, 2: {}, 3: {}},  # 3 repeaters
+            'server-3': {1: {}},  # 1 repeater
+        }
+        health = self._send_ping(proto, tm)
+        self.assertEqual(health['preferred_server'], 'server-3')
+
+    def test_pong_no_preferred_when_all_draining(self):
+        """No preferred_server when all peers are draining."""
+        proto, tm = self._make_proto()
+        proto._cluster_bus = MagicMock()
+        proto._cluster_bus._node_id = 'server-1'
+        proto._cluster_bus.get_peer_states.return_value = {
+            'server-2': {'alive': True, 'latency_ms': 1.0},
+        }
+        proto._draining_peers = {'server-2'}
+        health = self._send_ping(proto, tm)
+        self.assertNotIn('preferred_server', health)
+
+    def test_pong_redirect_on_drain(self):
+        """PONG includes redirect=True when this server is draining."""
+        proto, tm = self._make_proto()
+        proto._draining = True
+        health = self._send_ping(proto, tm)
+        self.assertTrue(health['redirect'])
+
+
 if __name__ == '__main__':
     unittest.main()

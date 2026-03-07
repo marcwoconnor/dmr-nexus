@@ -1088,17 +1088,44 @@ class HBProtocol(asyncio.DatagramProtocol):
         if client:
             client['last_ping'] = time()
 
-        # Build cluster health info
-        health = {}
+        # Build cluster health info (Phase 5.3: cluster-aware keepalive)
+        health = {
+            'node_id': self._cluster_bus._node_id if self._cluster_bus else 'standalone',
+            'active_streams': self._count_active_streams(),
+            'connected_repeaters': sum(1 for r in self._repeaters.values()
+                                       if r.connection_state == 'connected'),
+        }
+
         if self._cluster_bus:
             peers = self._cluster_bus.get_peer_states()
-            health = {
-                'peers': [{
+            peer_list = []
+            best_peer = None
+            best_load = float('inf')
+
+            for nid, ps in peers.items():
+                alive = ps['alive']
+                draining = nid in self._draining_peers
+                repeater_count = len(self._cluster_state.get(nid, {}))
+                status = 'draining' if draining else ('alive' if alive else 'dead')
+
+                peer_info = {
                     'node_id': nid,
-                    'alive': ps['alive'],
+                    'status': status,
                     'latency_ms': ps['latency_ms'],
-                } for nid, ps in peers.items()],
-            }
+                    'repeater_count': repeater_count,
+                }
+                peer_list.append(peer_info)
+
+                # Track lowest-load alive non-draining peer for preferred_server hint
+                if alive and not draining:
+                    load = repeater_count
+                    if load < best_load:
+                        best_load = load
+                        best_peer = nid
+
+            health['peers'] = peer_list
+            if best_peer:
+                health['preferred_server'] = best_peer
 
         # Token refresh: if within 20% of expiry, issue new token
         import base64

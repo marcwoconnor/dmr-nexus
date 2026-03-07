@@ -211,6 +211,23 @@ Bridges HomeBrew repeaters into the subscription-based routing system so both pr
 
 ---
 
+### Completed: Phase 5.3 (Cluster-Aware Keepalive)
+
+Enhanced PONG response with full cluster health for fast client failover.
+
+#### Modified Files
+| File | Changes |
+|------|---------|
+| `hblink4/hblink.py` | Enhanced `_handle_native_ping()` PONG: node_id, active_streams, connected_repeaters, per-peer status/load, preferred_server hint |
+| `tests/test_cluster.py` | 9 new tests: node_id (2), active_streams, peer status alive/draining/dead, preferred_server selection, no preferred when all draining, redirect on drain |
+
+#### Test Results
+- **203 tests total, 203 passing, 0 failures**
+
+---
+
+---
+
 ### What's Next
 
 Per the recommended implementation order:
@@ -226,4 +243,5 @@ Per the recommended implementation order:
 | 7 | 4.1 + 4.3 (Config Hot-Reload + Management Commands) | **DONE** |
 | 8 | 5.1 + 5.2 (Token Auth + Subscriptions) | **DONE** |
 | 9 | 5.4 (HomeBrew Proxy Adapter) | **DONE** |
-| 10+ | Phases 5.3, 5.5, 6.x | Pending |
+| 10 | 5.3 (Cluster-Aware Keepalive) | **DONE** |
+| 11+ | Phases 5.5, 6.x | Pending (defer until needed) |
