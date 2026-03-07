@@ -1074,7 +1074,7 @@ class HBProtocol(asyncio.DatagramProtocol):
             sub.to_dict(), separators=(',', ':')).encode(), addr)
 
     def _handle_native_ping(self, data: bytes, addr: tuple):
-        """Handle PING: respond with PONG + cluster health."""
+        """Handle PING: respond with PONG + cluster health + optional token refresh."""
         if len(data) < 12:
             return
 
@@ -1100,19 +1100,35 @@ class HBProtocol(asyncio.DatagramProtocol):
                 } for nid, ps in peers.items()],
             }
 
+        # Token refresh: if within 20% of expiry, issue new token
+        import base64
+        lifetime = token.expires_at - token.issued_at
+        if lifetime > 0 and time() > token.expires_at - (lifetime * 0.2):
+            new_token = self._token_manager.issue_token(
+                token.repeater_id, token.slot1_talkgroups, token.slot2_talkgroups)
+            health['new_token'] = base64.b64encode(new_token.to_bytes()).decode('ascii')
+            # Update client session with new token hash
+            if client:
+                client['token_hash'] = new_token.token_hash
+            LOGGER.info(f'Token refreshed for repeater {token.repeater_id}')
+
+        # Graceful drain: tell client to reconnect elsewhere
+        if self._draining:
+            health['redirect'] = True
+
         self._send_packet(NATIVE_MAGIC + CMD_PONG + json.dumps(
             health, separators=(',', ':')).encode(), addr)
 
     def _handle_native_data(self, data: bytes, addr: tuple):
         """Handle DATA: native client sending DMR data.
 
-        DATA format: CLNT(4B) + DATA(4B) + token_hash(4B) + DMRD_payload(53B)
-        The 53-byte payload is the HomeBrew DMRD content after the 'DMRD' prefix
-        (seqno + src + dst + repeater_id + slot_info + stream_id + dmr_data).
+        DATA format: CLNT(4B) + DATA(4B) + token_hash(4B) + DMRD_payload(51B+)
+        The payload is the HomeBrew DMRD content after the 'DMRD' prefix
+        (seqno + src + dst + repeater_id + slot_info + stream_id + dmr_data + BER + RSSI).
         We prepend DMRD to reconstruct a standard HomeBrew packet for the
         existing handler.
         """
-        if len(data) < 12 + 53:
+        if len(data) < 12 + 51:
             return
 
         token_hash = data[8:12]
@@ -1120,9 +1136,9 @@ class HBProtocol(asyncio.DatagramProtocol):
         if not token:
             return
 
-        # Reconstruct HomeBrew DMRD packet: DMRD(4B) + payload(53B) = 57B
-        # But _handle_dmr_data expects the full packet including DMRD prefix
-        dmrd_payload = data[12:12 + 53]
+        # Reconstruct HomeBrew DMRD packet: DMRD(4B) + payload(51B+)
+        # _handle_dmr_data expects the full packet including DMRD prefix
+        dmrd_payload = data[12:]
         full_packet = DMRD + dmrd_payload
         self._handle_dmr_data(full_packet, addr)
 
@@ -1137,6 +1153,23 @@ class HBProtocol(asyncio.DatagramProtocol):
 
         if addr in self._native_clients:
             del self._native_clients[addr]
+
+    # ========== HOMEBREW PROXY ADAPTER (Phase 5.4) ==========
+
+    def _create_homebrew_subscription(self, repeater_id: bytes, repeater: 'RepeaterState'):
+        """Create/update an internal subscription for a HomeBrew repeater.
+
+        Translates the repeater's config-assigned TG sets into a subscription,
+        so HomeBrew and native clients share the same routing data source.
+        """
+        rid_int = rid_to_int(repeater_id)
+
+        # Convert bytes TG sets to int lists for subscription store
+        s1 = [int.from_bytes(tg, 'big') for tg in repeater.slot1_talkgroups] if repeater.slot1_talkgroups is not None else None
+        s2 = [int.from_bytes(tg, 'big') for tg in repeater.slot2_talkgroups] if repeater.slot2_talkgroups is not None else None
+
+        # For HomeBrew repeaters, requested == allowed (config assigns TGs directly)
+        self._subscriptions.subscribe(rid_int, s1, s2, s1, s2)
 
     # ========== CONFIG HOT-RELOAD (Phase 4.1) ==========
 
@@ -2493,8 +2526,9 @@ class HBProtocol(asyncio.DatagramProtocol):
 
             # Remove from active repeaters
             del self._repeaters[repeater_id]
-            
-            # No cache cleanup needed - using direct conversions to prevent memory leaks
+
+            # Remove subscription (Phase 5.4 proxy adapter)
+            self._subscriptions.unsubscribe(rid_to_int(repeater_id))
             
 
     def _handle_repeater_login(self, repeater_id: bytes, addr: PeerAddress) -> None:
@@ -2655,7 +2689,10 @@ class HBProtocol(asyncio.DatagramProtocol):
             # Notify cluster peers
             if self._cluster_bus:
                 asyncio.ensure_future(self._broadcast_repeater_up(repeater_id, repeater))
-            
+
+            # HomeBrew proxy adapter (Phase 5.4): create internal subscription
+            self._create_homebrew_subscription(repeater_id, repeater)
+
         except Exception as e:
             LOGGER.error(f'Error parsing config: {str(e)}')
             if 'repeater_id' in locals():
@@ -2840,7 +2877,10 @@ class HBProtocol(asyncio.DatagramProtocol):
             
             # Send ACK
             self._send_packet(b''.join([RPTACK, repeater_id]), addr)
-            
+
+            # Update subscription (Phase 5.4 proxy adapter)
+            self._create_homebrew_subscription(repeater_id, repeater)
+
         except Exception as e:
             LOGGER.error(f'Error processing RPTO from {rid_to_int(repeater_id)}: {e}')
             # Still send ACK to avoid retries
@@ -3012,6 +3052,16 @@ class HBProtocol(asyncio.DatagramProtocol):
                 # Passed all checks - will receive entire transmission
                 target_set.add(('outbound', conn_name))
 
+            # Calculate native client targets (Phase 5)
+            for nc_addr, nc_info in self._native_clients.items():
+                nc_rid = nc_info['repeater_id']
+                nc_sub = self._subscriptions.get_subscription(nc_rid)
+                if nc_sub:
+                    tgs = nc_sub.slot1_talkgroups if slot == 1 else nc_sub.slot2_talkgroups
+                    dst_id_int_nc = int.from_bytes(dst_id, 'big')
+                    if tgs and dst_id_int_nc in tgs:
+                        target_set.add(('native', nc_addr))
+
             # Calculate cluster peer targets (Phase 2.1)
             # Route to servers, not individual repeaters — break after first match per peer
             if self._cluster_bus:
@@ -3100,6 +3150,16 @@ class HBProtocol(asyncio.DatagramProtocol):
                 self._update_assumed_stream_outbound(outbound, slot, rf_src, dst_id,
                                                     stream_id, is_terminator,
                                                     int.from_bytes(source_repeater_id, 'big'))
+
+            elif isinstance(target, tuple) and target[0] == 'native':
+                # Target is a native protocol client — send CLNT+DATA format
+                nc_addr = target[1]
+                nc_info = self._native_clients.get(nc_addr)
+                if nc_info:
+                    token_hash = nc_info['token_hash']
+                    # Strip DMRD prefix, wrap in native format
+                    native_pkt = NATIVE_MAGIC + CMD_DATA + token_hash + data[4:]
+                    self._send_packet(native_pkt, nc_addr)
 
             elif isinstance(target, tuple) and target[0] == 'cluster':
                 # Collect cluster targets for async send after loop

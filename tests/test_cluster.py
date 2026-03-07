@@ -17,6 +17,7 @@ from hblink4.cluster import (
     AUTH_CHALLENGE, AUTH_RESPONSE, AUTH_OK
 )
 from hblink4.models import StreamState, RepeaterState
+from hblink4.subscriptions import SubscriptionStore
 
 
 class TestPeerState(unittest.TestCase):
@@ -278,6 +279,8 @@ def _make_hbprotocol_for_routing():
     mock._cluster_state = {}
     mock._virtual_streams = {}
     mock._draining_peers = set()
+    mock._native_clients = {}
+    mock._subscriptions = SubscriptionStore()
 
     # Bind real methods
     mock._calculate_stream_targets = HBProtocol._calculate_stream_targets.__get__(mock)
@@ -1272,6 +1275,253 @@ class TestManagementSocket(unittest.IsolatedAsyncioTestCase):
             server.close()
             await server.wait_closed()
             os.unlink(sock_path)
+
+
+# ========== Phase 5.4: HomeBrew Proxy Adapter Tests ==========
+
+class TestHomebrewProxySubscription(unittest.TestCase):
+    """HomeBrew repeaters get internal subscriptions via proxy adapter."""
+
+    def _make_proto(self):
+        from hblink4.hblink import HBProtocol, CONFIG, rid_to_int
+        CONFIG.clear()
+        CONFIG.update({
+            'global': {
+                'bind_address': '0.0.0.0', 'port': 62030, 'passphrase': 'test',
+                'max_missed_pings': 3, 'ping_time': 5, 'stream_timeout': 2.0,
+                'stream_hang_time': 10.0, 'user_cache_timeout': 300,
+            },
+            'repeater_configurations': {'patterns': []},
+            'blacklist': {'patterns': []},
+            'connection_type_detection': {'categories': {}},
+        })
+        mock = MagicMock(spec=HBProtocol)
+        mock._subscriptions = SubscriptionStore()
+        mock._create_homebrew_subscription = HBProtocol._create_homebrew_subscription.__get__(mock)
+        mock._remove_repeater = HBProtocol._remove_repeater.__get__(mock)
+        mock._repeaters = {}
+        mock._events = MagicMock()
+        mock._cluster_bus = None
+        return mock, rid_to_int
+
+    def test_creates_subscription_from_bytes_tgs(self):
+        """HomeBrew repeater TG bytes are converted to int subscription."""
+        proto, rid_to_int = self._make_proto()
+        repeater = MagicMock()
+        repeater.slot1_talkgroups = {b'\x00\x00\x08', b'\x00\x00\x09'}  # TG 8, 9
+        repeater.slot2_talkgroups = {b'\x00\x0c\x30'}  # TG 3120
+
+        rid = b'\x00\x04\xc2\xc0'  # 312000
+        proto._create_homebrew_subscription(rid, repeater)
+
+        sub = proto._subscriptions.get_subscription(312000)
+        self.assertIsNotNone(sub)
+        self.assertEqual(sub.slot1_talkgroups, {8, 9})
+        self.assertEqual(sub.slot2_talkgroups, {3120})
+
+    def test_none_tgs_passes_none(self):
+        """None TG sets (allow-all config) pass through as None."""
+        proto, _ = self._make_proto()
+        repeater = MagicMock()
+        repeater.slot1_talkgroups = None
+        repeater.slot2_talkgroups = None
+
+        proto._create_homebrew_subscription(b'\x00\x00\x00\x01', repeater)
+        # With both requested and allowed as None, intersection returns empty set
+        sub = proto._subscriptions.get_subscription(1)
+        self.assertIsNotNone(sub)
+
+    def test_subscription_removed_on_repeater_disconnect(self):
+        """Subscription cleaned up when HomeBrew repeater disconnects."""
+        proto, rid_to_int = self._make_proto()
+        rid = b'\x00\x00\x00\x42'  # 66
+        repeater = MagicMock()
+        repeater.slot1_talkgroups = {b'\x00\x00\x08'}
+        repeater.slot2_talkgroups = set()
+        proto._repeaters[rid] = repeater
+
+        # Create subscription
+        proto._create_homebrew_subscription(rid, repeater)
+        self.assertIsNotNone(proto._subscriptions.get_subscription(66))
+
+        # Remove repeater (calls unsubscribe internally)
+        proto._remove_repeater(rid, 'test')
+        self.assertIsNone(proto._subscriptions.get_subscription(66))
+
+    def test_subscription_updated_on_rpto(self):
+        """Calling _create_homebrew_subscription again updates the subscription."""
+        proto, _ = self._make_proto()
+        rid = b'\x00\x00\x00\x01'
+        repeater = MagicMock()
+        repeater.slot1_talkgroups = {b'\x00\x00\x08'}
+        repeater.slot2_talkgroups = set()
+
+        proto._create_homebrew_subscription(rid, repeater)
+        self.assertEqual(proto._subscriptions.get_subscription(1).slot1_talkgroups, {8})
+
+        # Simulate RPTO update
+        repeater.slot1_talkgroups = {b'\x00\x00\x08', b'\x00\x00\x09'}
+        proto._create_homebrew_subscription(rid, repeater)
+        self.assertEqual(proto._subscriptions.get_subscription(1).slot1_talkgroups, {8, 9})
+
+
+class TestNativeClientTargetCalculation(unittest.TestCase):
+    """Native clients appear as targets when their subscription matches."""
+
+    def setUp(self):
+        self.proto = _make_hbprotocol_for_routing()
+
+    def test_native_client_targeted_when_tg_matches(self):
+        """Native client with matching TG subscription appears in targets."""
+        nc_addr = ('10.0.0.5', 50000)
+        self.proto._native_clients[nc_addr] = {
+            'token_hash': b'\x01\x02\x03\x04',
+            'repeater_id': 999,
+            'last_ping': time(),
+        }
+        self.proto._subscriptions.subscribe(999, [8], [3120], None, None)
+
+        targets = self.proto._calculate_stream_targets(
+            source_repeater_id=b'\x00\x00\x00\x01',
+            dst_id=b'\x00\x00\x08',  # TG 8
+            slot=1,
+            stream_id=b'\xaa\xbb\xcc\xdd',
+            rf_src=b'\x00\x00\x01',
+        )
+        self.assertIn(('native', nc_addr), targets)
+
+    def test_native_client_excluded_wrong_tg(self):
+        """Native client not targeted when TG doesn't match subscription."""
+        nc_addr = ('10.0.0.5', 50000)
+        self.proto._native_clients[nc_addr] = {
+            'token_hash': b'\x01\x02\x03\x04',
+            'repeater_id': 999,
+            'last_ping': time(),
+        }
+        self.proto._subscriptions.subscribe(999, [8], [3120], None, None)
+
+        targets = self.proto._calculate_stream_targets(
+            source_repeater_id=b'\x00\x00\x00\x01',
+            dst_id=b'\x00\x00\x09',  # TG 9 — not subscribed
+            slot=1,
+            stream_id=b'\xaa\xbb\xcc\xdd',
+            rf_src=b'\x00\x00\x01',
+        )
+        self.assertNotIn(('native', nc_addr), targets)
+
+    def test_native_client_excluded_wrong_slot(self):
+        """Native client subscribed on slot 1 not targeted for slot 2 traffic."""
+        nc_addr = ('10.0.0.5', 50000)
+        self.proto._native_clients[nc_addr] = {
+            'token_hash': b'\x01\x02\x03\x04',
+            'repeater_id': 999,
+            'last_ping': time(),
+        }
+        self.proto._subscriptions.subscribe(999, [8], [], None, None)
+
+        targets = self.proto._calculate_stream_targets(
+            source_repeater_id=b'\x00\x00\x00\x01',
+            dst_id=b'\x00\x00\x08',  # TG 8
+            slot=2,  # Slot 2 — no TGs subscribed
+            stream_id=b'\xaa\xbb\xcc\xdd',
+            rf_src=b'\x00\x00\x01',
+        )
+        self.assertNotIn(('native', nc_addr), targets)
+
+    def test_multiple_native_clients(self):
+        """Multiple native clients with matching TG all targeted."""
+        for i, port in enumerate([50000, 50001]):
+            addr = ('10.0.0.5', port)
+            self.proto._native_clients[addr] = {
+                'token_hash': bytes([i] * 4),
+                'repeater_id': 900 + i,
+                'last_ping': time(),
+            }
+            self.proto._subscriptions.subscribe(900 + i, [8], [], None, None)
+
+        targets = self.proto._calculate_stream_targets(
+            source_repeater_id=b'\x00\x00\x00\x01',
+            dst_id=b'\x00\x00\x08',
+            slot=1,
+            stream_id=b'\xaa\xbb\xcc\xdd',
+            rf_src=b'\x00\x00\x01',
+        )
+        self.assertIn(('native', ('10.0.0.5', 50000)), targets)
+        self.assertIn(('native', ('10.0.0.5', 50001)), targets)
+
+
+class TestNativeClientForwarding(unittest.TestCase):
+    """Native client packet formatting in _forward_stream."""
+
+    def _make_proto(self):
+        from hblink4.hblink import HBProtocol, CONFIG
+        CONFIG.clear()
+        CONFIG.update({
+            'global': {
+                'bind_address': '0.0.0.0', 'port': 62030, 'passphrase': 'test',
+                'max_missed_pings': 3, 'ping_time': 5, 'stream_timeout': 2.0,
+                'stream_hang_time': 10.0, 'user_cache_timeout': 300,
+            },
+            'repeater_configurations': {'patterns': []},
+            'blacklist': {'patterns': []},
+            'connection_type_detection': {'categories': {}},
+        })
+        mock = MagicMock(spec=HBProtocol)
+        mock._repeaters = {}
+        mock._outbounds = {}
+        mock._cluster_bus = None
+        mock._native_clients = {
+            ('10.0.0.5', 50000): {
+                'token_hash': b'\x01\x02\x03\x04',
+                'repeater_id': 999,
+            }
+        }
+        mock._subscriptions = SubscriptionStore()
+        mock._streams = {}
+        mock._forward_stream = HBProtocol._forward_stream.__get__(mock)
+        mock._is_dmr_terminator = HBProtocol._is_dmr_terminator.__get__(mock)
+        return mock
+
+    def test_native_forward_packet_format(self):
+        """Native forwarding wraps DMRD payload in CLNT+DATA+token_hash."""
+        from hblink4.cluster_protocol import NATIVE_MAGIC, CMD_DATA
+        proto = self._make_proto()
+
+        # Build a DMRD packet with valid frame type byte at offset 15
+        # 4B DMRD + 11B header + 1B frame_type + remaining
+        dmrd_header = b'DMRD'  # 4 bytes
+        dmrd_mid = b'\x00' * 11  # bytes 4-14
+        frame_byte = b'\x00'  # byte 15 — frame type bits
+        dmrd_tail = b'\x00' * 39  # bytes 16-54
+        data = dmrd_header + dmrd_mid + frame_byte + dmrd_tail  # 55 bytes
+
+        # Set up source repeater with a cached stream targeting our native client
+        src_rid = b'\x00\x00\x00\x01'
+        stream_id = b'\xaa\xbb\xcc\xdd'
+        source_repeater = MagicMock()
+        source_stream = MagicMock()
+        source_stream.stream_id = stream_id
+        source_stream.routing_cached = True
+        source_stream.target_repeaters = {('native', ('10.0.0.5', 50000))}
+        source_repeater.get_slot_stream.return_value = source_stream
+        proto._repeaters[src_rid] = source_repeater
+
+        proto._forward_stream(
+            data=data,
+            source_repeater_id=src_rid,
+            slot=1,
+            rf_src=b'\x00\x00\x01',
+            dst_id=b'\x00\x00\x08',
+            stream_id=stream_id,
+        )
+
+        # Verify _send_packet was called with CLNT+DATA+token_hash+dmrd_payload
+        proto._send_packet.assert_called_once()
+        sent_pkt, sent_addr = proto._send_packet.call_args[0]
+        self.assertEqual(sent_addr, ('10.0.0.5', 50000))
+        self.assertTrue(sent_pkt.startswith(NATIVE_MAGIC + CMD_DATA))
+        self.assertEqual(sent_pkt[8:12], b'\x01\x02\x03\x04')  # token_hash
+        self.assertEqual(sent_pkt[12:], data[4:])  # DMRD body without 'DMRD' prefix
 
 
 if __name__ == '__main__':

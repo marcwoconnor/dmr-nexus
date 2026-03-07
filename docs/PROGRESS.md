@@ -193,6 +193,24 @@ Cluster-native client protocol with stateless token auth and client-driven TG su
 
 ---
 
+### Completed: Phase 5.4 (HomeBrew Proxy Adapter)
+
+Bridges HomeBrew repeaters into the subscription-based routing system so both protocols share one routing path.
+
+#### Modified Files
+| File | Changes |
+|------|---------|
+| `hblink4/hblink.py` | `_create_homebrew_subscription()`, native client loop in `_calculate_stream_targets()`, native forwarding in `_forward_stream()`, subscription cleanup in `_remove_repeater()` |
+| `tests/test_cluster.py` | 9 new tests: proxy subscription (4), native target calc (4), native forwarding (1). Added `_native_clients`+`_subscriptions` to routing test mock |
+
+#### Test Results
+- **194 tests total, 194 passing, 0 failures**
+- 9 new Phase 5.4 tests + 29 Phase 5.1/5.2 tests + 56 prior cluster tests + 87 existing + 13 other
+
+---
+
+---
+
 ### What's Next
 
 Per the recommended implementation order:
@@ -207,5 +225,5 @@ Per the recommended implementation order:
 | 6 | 1.4 + 4.2 (Dashboard Cluster View) | **DONE** |
 | 7 | 4.1 + 4.3 (Config Hot-Reload + Management Commands) | **DONE** |
 | 8 | 5.1 + 5.2 (Token Auth + Subscriptions) | **DONE** |
-| 9 | 5.4 (HomeBrew Proxy Adapter) | Next |
+| 9 | 5.4 (HomeBrew Proxy Adapter) | **DONE** |
 | 10+ | Phases 5.3, 5.5, 6.x | Pending |
