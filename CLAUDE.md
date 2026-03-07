@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-HBlink4 is a clustered DMR (Digital Mobile Radio) network server. Originally a single-server HomeBrew protocol implementation by Cort Buffington (N0MJS), it has been extensively extended with multi-server clustering, a cluster-native client protocol, inter-region backbone routing, and global-scale hierarchical forwarding. Three main components: the core asyncio UDP server (`hblink4/`), a FastAPI real-time web dashboard (`dashboard/`), and a management CLI (`hbctl.py`).
+DMR Nexus is a distributed DMR (Digital Mobile Radio) network platform. Built on the HBlink foundation by Cort Buffington (N0MJS), it has been extensively extended with multi-server clustering, a cluster-native client protocol, inter-region backbone routing, and global-scale hierarchical forwarding. Three main components: the core asyncio UDP server (`hblink4/`), a FastAPI real-time web dashboard (`dashboard/`), and a management CLI (`hbctl.py`).
 
 ## Commands
 
@@ -89,4 +89,4 @@ JSON configs in `config/`. Sample: `config/config_sample.json`. Key sections:
 - `user.csv` at repo root provides radio ID → callsign mapping
 - Tests use self-contained inline config via `_make_config()` helpers, not config_sample.json
 - Routing test mock (`_make_hbprotocol_for_routing()`) provides a minimal HBProtocol with real methods bound to a MagicMock
-- 258 tests across 11 test files, all passing
+- 282 tests across 11 test files, all passing

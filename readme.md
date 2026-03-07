@@ -1,10 +1,10 @@
-# HBlink4 — Clustered DMR Network Server
+# DMR Nexus — Distributed DMR Network Platform
 
-HBlink4 is a DMR (Digital Mobile Radio) network server implementing the HomeBrew protocol for amateur radio networks. Originally developed by Cort Buffington (N0MJS) as a single-server endpoint, HBlink4 has been extensively rewritten and extended by Marc O'Connor, KK4WTI to support **multi-server clustering**, a **cluster-native client protocol**, **inter-region backbone routing**, and **global-scale hierarchical forwarding** — transforming it from a standalone repeater server into a distributed DMR network platform.
+DMR Nexus is a distributed DMR (Digital Mobile Radio) network platform implementing the HomeBrew protocol for amateur radio networks. Built on the foundation of HBlink by Cort Buffington (N0MJS), DMR Nexus has been extensively rewritten and extended by Marc O'Connor, KK4WTI to support **multi-server clustering**, a **cluster-native client protocol**, **inter-region backbone routing**, and **global-scale hierarchical forwarding** — transforming a standalone repeater server into a distributed network platform.
 
 ## What's Different
 
-The original HBlink was a single-server design: one process, one set of repeaters, no coordination between instances. This fork adds:
+The original HBlink was a single-server design: one process, one set of repeaters, no coordination between instances. DMR Nexus adds:
 
 | Capability | Description |
 |-----------|-------------|
@@ -59,7 +59,7 @@ FastAPI app receiving events from the core server via socket, pushing to browser
 
 ### Test Suite
 
-258 tests across 11 test files (~4,900 lines). All tests use self-contained inline config — no dependency on config files.
+282 tests across 11 test files. All tests use self-contained inline config — no dependency on config files.
 
 ## Quick Start
 
@@ -135,8 +135,8 @@ See `config/config_sample.json` for a complete example with all sections documen
 
 ## Credits
 
-- **Cort Buffington, N0MJS** — Original HBlink/HBlink3 design, HomeBrew protocol implementation, single-server architecture. HBlink4 was forked from his work and retains the core UDP protocol handler and packet parsing.
-- **Marc O'Connor, KK4WTI** — Clustering architecture, backbone bus, native client protocol, cross-region routing, global-scale hierarchical forwarding, management interface, and the extensive test suite. All code from Phase 1 through Phase 6.4.
+- **Cort Buffington, N0MJS** — Original HBlink/HBlink3 design, HomeBrew protocol implementation, single-server architecture. DMR Nexus was built on his work and retains the core UDP protocol handler and packet parsing.
+- **Marc O'Connor, KK4WTI** — DMR Nexus platform: clustering architecture, backbone bus, native client protocol, cross-region routing, global-scale hierarchical forwarding, gateway failover, latency tracing, management interface, and the extensive test suite.
 - The MMDVM and DMR amateur radio community.
 
 ## License
