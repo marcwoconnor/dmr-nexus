@@ -53,7 +53,23 @@
         "shared_secret": "change-me-cluster-secret",
         "heartbeat_interval": 2.0,
         "dead_threshold": 6.0,
-        "reconnect_interval": 5.0
+        "reconnect_interval": 5.0,
+        "region": "us-east",
+        "role": "node"
+    },
+    "backbone": {
+        "_comment": "Backbone bus for inter-region gateway connections. Only gateway nodes (role=gateway in cluster config) should enable this.",
+        "enabled": false,
+        "bind": "0.0.0.0",
+        "port": 62033,
+        "backbone_secret": "change-me-backbone-secret",
+        "heartbeat_interval": 5.0,
+        "dead_threshold": 15.0,
+        "reconnect_interval": 10.0,
+        "gateways": [
+            {"node_id": "gw-us-west", "region_id": "us-west", "address": "10.0.2.1", "port": 62033},
+            {"node_id": "gw-eu", "region_id": "eu", "address": "10.0.3.1", "port": 62033}
+        ]
     },
     "dashboard": {
         "enabled": true,

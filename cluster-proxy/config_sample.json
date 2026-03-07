@@ -1,0 +1,22 @@
+{
+  "local": {
+    "address": "0.0.0.0",
+    "port": 62031,
+    "passphrase": "local-repeater-passphrase",
+    "repeater_id": 312100
+  },
+  "cluster": {
+    "servers": [
+      {"address": "10.31.11.10", "port": 62031},
+      {"address": "10.31.11.11", "port": 62031}
+    ],
+    "passphrase": "cluster-server-passphrase",
+    "ping_interval": 5,
+    "ping_timeout": 3
+  },
+  "subscription": {
+    "slot1": [8, 9, 3120, 3121],
+    "slot2": [3100, 3110, 3120, 9998]
+  },
+  "log_level": "info"
+}

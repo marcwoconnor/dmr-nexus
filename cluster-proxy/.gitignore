@@ -1,0 +1,4 @@
+# Compiled binary
+cluster-proxy
+# Config with real credentials
+config.json
