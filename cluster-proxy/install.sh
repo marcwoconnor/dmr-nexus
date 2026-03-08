@@ -76,7 +76,7 @@ $SUDO tee "${SERVICE_FILE}" > /dev/null <<EOF
 [Unit]
 Description=DMR Cluster Proxy (HomeBrew to Cluster-Native)
 After=network.target
-Wants=hblink4.service
+Wants=nexus.service
 
 [Service]
 Type=simple

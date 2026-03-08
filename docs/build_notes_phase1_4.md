@@ -22,7 +22,7 @@ Each emit contains:
 
 ## Code Changes
 
-### hblink4/hblink.py
+### nexus/hblink.py
 - `_emit_cluster_state()`: builds snapshot from `cluster_bus.get_peer_states()` + `_cluster_state` repeater counts + `_draining_peers`, calls `self._events.emit('cluster_state', ...)`
 - 8 call sites added: peer_connected, peer_disconnected, repeater_up, repeater_down, sync_state, node_draining, node_down, _send_initial_state
 

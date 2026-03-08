@@ -18,7 +18,7 @@ Region: us-east                    Region: us-west
 - **Inter-region**: Gateway-to-gateway via `BackboneBus` (new, port 62033)
 - **Separate secrets**: `shared_secret` for cluster, `backbone_secret` for backbone
 
-## New File: `hblink4/backbone.py` (~500 lines)
+## New File: `nexus/backbone.py` (~500 lines)
 
 ### BackboneBus
 Same pattern as ClusterBus — TCP mesh, HMAC-SHA256 auth, heartbeats, length-prefixed framing. Key differences:

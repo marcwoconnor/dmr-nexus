@@ -17,11 +17,11 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from hblink4.cluster_protocol import (
+from nexus.cluster_protocol import (
     Token, TokenManager, NATIVE_MAGIC, CMD_AUTH, CMD_AUTH_ACK, CMD_DATA,
     CMD_SUBSCRIBE, CMD_SUB_ACK, CMD_PING, CMD_PONG,
 )
-from hblink4.subscriptions import SubscriptionStore
+from nexus.subscriptions import SubscriptionStore
 
 
 class TestNativeDataPacketFormat(unittest.TestCase):

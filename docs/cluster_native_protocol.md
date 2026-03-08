@@ -116,7 +116,7 @@ This requires deduplication on the client side (it'll receive the same stream fr
 
 ## What Changes in HBlink4
 
-### New module: `hblink4/cluster_protocol.py`
+### New module: `nexus/cluster_protocol.py`
 
 Handles the new packet format, token validation, and subscription management. Lives alongside the existing `protocol.py` — the server can speak both protocols simultaneously on different ports.
 

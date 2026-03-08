@@ -104,9 +104,9 @@ Certain sections of code have been commented out with specific marker phrases to
 ### Per-packet logging - only enable for heavy troubleshooting
 
 **Purpose**: High-frequency debug logging that generates massive amounts of output  
-**Location**: `hblink4/hblink.py`  
+**Location**: `nexus/hblink.py`  
 **When to enable**: Only when troubleshooting specific packet-level issues  
-**Search command**: `grep -n "Per-packet logging" hblink4/hblink.py`
+**Search command**: `grep -n "Per-packet logging" nexus/hblink.py`
 
 **Commented sections**:
 1. Command bytes logging (line ~719)
@@ -120,9 +120,9 @@ Certain sections of code have been commented out with specific marker phrases to
 ### LC recovery - disabled until fixed
 
 **Purpose**: Embedded Link Control extraction from voice frames  
-**Location**: `hblink4/hblink.py`  
+**Location**: `nexus/hblink.py`  
 **Status**: Not currently working correctly, disabled pending fix  
-**Search command**: `grep -n "LC recovery" hblink4/hblink.py`
+**Search command**: `grep -n "LC recovery" nexus/hblink.py`
 
 **Commented sections**:
 1. StreamInfo fields: `missed_header`, `embedded_lc_bits` (line ~78-79)

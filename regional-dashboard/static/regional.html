@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DMR Nexus Regional Dashboard</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; padding: 12px; }
+        .container { max-width: 1600px; margin: 0 auto; }
+
+        /* Header */
+        header { margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+        h1 { color: #38bdf8; font-size: 28px; }
+        .header-left { display: flex; align-items: center; gap: 12px; }
+        .region-badge { background: #1e293b; color: #94a3b8; padding: 4px 10px; border-radius: 4px; font-size: 13px; }
+
+        /* Node status badges */
+        .node-badges { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+        .node-badge { padding: 6px 12px; border-radius: 6px; font-size: 13px; font-weight: 500; transition: all 0.2s; }
+        .node-badge.online { background: #10b981; color: white; }
+        .node-badge.offline { background: #ef4444; color: white; animation: pulse 2s ease-in-out infinite; }
+        .node-badge.partial { background: #f59e0b; color: white; }
+
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+        .ws-status { padding: 6px 12px; border-radius: 6px; font-size: 13px; font-weight: 500; }
+        .ws-status.connected { background: #10b981; color: white; }
+        .ws-status.disconnected { background: #ef4444; color: white; animation: pulse 2s ease-in-out infinite; }
+
+        /* Stats bar */
+        .stats-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 15px; }
+        .stat-card { background: #1e293b; padding: 8px 12px; border-radius: 6px; }
+        .stat-label { color: #94a3b8; font-size: 12px; margin-bottom: 5px; }
+        .stat-value { color: #e2e8f0; font-size: 24px; font-weight: 600; }
+
+        /* Section headers */
+        .section-header { color: #94a3b8; font-size: 16px; margin-bottom: 12px; margin-top: 20px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+
+        /* Cards */
+        .card { background: #1e293b; border-radius: 8px; padding: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); margin-bottom: 15px; }
+        .card h2 { color: #94a3b8; font-size: 16px; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+
+        /* Node health cards */
+        .node-health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; margin-bottom: 15px; }
+        .node-card { background: #1e293b; padding: 12px 16px; border-radius: 6px; border-left: 3px solid #64748b; }
+        .node-card.online { border-left-color: #22c55e; }
+        .node-card.offline { border-left-color: #ef4444; }
+        .node-card.partial { border-left-color: #f59e0b; }
+        .node-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .node-card-name { font-weight: 600; font-size: 15px; color: #e2e8f0; }
+        .node-status-dot { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; }
+        .node-status-dot::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: #64748b; }
+        .node-status-dot.online::before { background: #22c55e; }
+        .node-status-dot.offline::before { background: #ef4444; }
+        .node-card-details { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; font-size: 12px; }
+        .node-card-details .cl { color: #64748b; }
+        .node-card-details .cv { color: #cbd5e1; }
+
+        /* Cluster peers within node card */
+        .cluster-peers { margin-top: 8px; padding-top: 8px; border-top: 1px solid #334155; }
+        .cluster-peers-label { font-size: 11px; color: #64748b; text-transform: uppercase; margin-bottom: 4px; }
+        .cluster-peer { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; margin-right: 10px; }
+        .cluster-peer-dot { width: 6px; height: 6px; border-radius: 50%; }
+        .cluster-peer-dot.alive { background: #22c55e; }
+        .cluster-peer-dot.dead { background: #ef4444; }
+
+        /* Traffic comparison */
+        .traffic-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 10px; margin-bottom: 15px; }
+        .traffic-card { background: #1e293b; padding: 12px; border-radius: 6px; }
+        .traffic-card-name { font-weight: 600; font-size: 14px; color: #e2e8f0; margin-bottom: 8px; }
+        .traffic-bar-container { margin-bottom: 6px; }
+        .traffic-bar-label { font-size: 11px; color: #94a3b8; margin-bottom: 2px; display: flex; justify-content: space-between; }
+        .traffic-bar { height: 8px; background: #334155; border-radius: 4px; overflow: hidden; }
+        .traffic-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+        .traffic-bar-fill.calls { background: #38bdf8; }
+        .traffic-bar-fill.duration { background: #8b5cf6; }
+        .traffic-bar-fill.streams { background: #10b981; }
+
+        /* Map */
+        #map { height: 350px; border-radius: 8px; margin-bottom: 15px; }
+        .map-popup-name { font-weight: 600; color: #1e293b; }
+        .map-popup-detail { font-size: 12px; color: #475569; }
+        .server-marker { border-radius: 4px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 8px rgba(56, 189, 248, 0.4); }
+        .server-marker-inner { width: 8px; height: 8px; border-radius: 2px; }
+        .server-label { background: transparent !important; border: none !important; color: #e2e8f0; font-size: 12px; font-weight: 600; text-shadow: 1px 1px 3px #000, -1px -1px 3px #000, 0 0 6px #000; white-space: nowrap; padding: 0 !important; }
+
+        /* Tables */
+        table { width: 100%; border-collapse: collapse; }
+        th { color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; text-align: left; padding: 6px 8px; border-bottom: 1px solid #334155; font-weight: 600; }
+        td { padding: 6px 8px; border-bottom: 1px solid #1e293b; font-size: 13px; }
+        tr:hover { background: #1e293b; }
+
+        .callsign { color: #38bdf8; font-weight: 600; }
+        .tg-badge { background: #334155; color: #e2e8f0; padding: 2px 6px; border-radius: 3px; font-size: 12px; }
+        .node-tag { background: #1e3a5f; color: #7dd3fc; padding: 1px 6px; border-radius: 3px; font-size: 11px; }
+        .active-indicator { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #22c55e; margin-right: 4px; }
+
+        /* Repeater cards - regional version */
+        .repeater-group { margin-bottom: 15px; }
+        .repeater-group-header { color: #94a3b8; font-size: 14px; font-weight: 600; margin-bottom: 8px; padding-left: 4px; }
+        .repeater-mini { background: #1e293b; padding: 8px 12px; border-radius: 6px; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
+        .repeater-mini-left { display: flex; align-items: center; gap: 8px; }
+        .repeater-mini-callsign { font-weight: 600; color: #38bdf8; font-size: 14px; }
+        .repeater-mini-id { color: #64748b; font-size: 12px; }
+        .repeater-mini-type { font-size: 11px; padding: 1px 6px; border-radius: 3px; }
+        .repeater-mini-type.repeater { background: #1e3a5f; color: #7dd3fc; }
+        .repeater-mini-type.hotspot { background: #3b1f5e; color: #c084fc; }
+        .repeater-mini-type.network { background: #1a3a2a; color: #6ee7b7; }
+        .repeater-mini-right { display: flex; align-items: center; gap: 12px; font-size: 12px; color: #94a3b8; }
+
+        /* Events log */
+        .event-row { padding: 4px 8px; border-bottom: 1px solid #1e293b; font-size: 13px; display: flex; gap: 8px; align-items: baseline; }
+        .event-time { color: #64748b; font-size: 12px; min-width: 70px; }
+        .event-node { font-size: 11px; color: #94a3b8; min-width: 60px; }
+        .event-type { font-weight: 500; min-width: 80px; }
+        .event-type.start { color: #22c55e; }
+        .event-type.end { color: #94a3b8; }
+        .event-detail { color: #cbd5e1; }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            h1 { font-size: 22px; }
+            .stats-bar { grid-template-columns: repeat(2, 1fr); }
+            .node-health-grid { grid-template-columns: 1fr; }
+            #map { height: 250px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-left">
+                <h1 id="dashTitle">DMR Nexus Regional</h1>
+                <span class="region-badge" id="regionBadge"></span>
+            </div>
+            <div class="node-badges" id="nodeBadges">
+                <span class="ws-status disconnected" id="wsStatus">Connecting...</span>
+            </div>
+        </header>
+
+        <!-- Stats -->
+        <div class="stats-bar" id="statsBar"></div>
+
+        <!-- Node Health -->
+        <h2 class="section-header">Node Health</h2>
+        <div class="node-health-grid" id="nodeHealth"></div>
+
+        <!-- Traffic Comparison -->
+        <h2 class="section-header">Traffic</h2>
+        <div class="traffic-grid" id="trafficGrid"></div>
+
+        <!-- Map -->
+        <h2 class="section-header">Network Map</h2>
+        <div id="map"></div>
+
+        <!-- Last Heard -->
+        <div class="card">
+            <h2>Last Heard</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th>Callsign</th>
+                        <th>Radio ID</th>
+                        <th>Node</th>
+                        <th>Talkgroup</th>
+                        <th>Slot</th>
+                        <th>Last Heard</th>
+                    </tr>
+                </thead>
+                <tbody id="lastHeardBody"></tbody>
+            </table>
+        </div>
+
+        <!-- Repeaters -->
+        <div class="card">
+            <h2>Repeaters</h2>
+            <div id="repeatersContainer"></div>
+        </div>
+
+        <!-- Events -->
+        <div class="card" style="margin-top: 15px;">
+            <h2>Recent Events</h2>
+            <div id="eventsLog"></div>
+        </div>
+    </div>
+
+    <script>
+    let ws = null;
+    let reconnectTimeout = null;
+    let map = null;
+    let markers = [];
+    let serverMarkers = [];
+    let connectionLines = [];
+    let mapInitialBoundsFit = false;
+
+    let state = {
+        nodes: [],
+        repeaters: [],
+        streams: [],
+        stats: {},
+        last_heard: [],
+        events: [],
+        config: {}
+    };
+
+    // --- Map ---
+
+    function initMap() {
+        map = L.map('map', { scrollWheelZoom: true }).setView([39.8, -98.5], 4);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; OpenStreetMap &copy; CARTO',
+            maxZoom: 19
+        }).addTo(map);
+        map.on('zoomend', updateLabelVisibility);
+        map.on('moveend', updateLabelVisibility);
+    }
+
+    const nodeColors = ['#38bdf8', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#ec4899'];
+
+    // Build set of repeater keys with active streams
+    function getActiveRepeaters() {
+        const active = new Set();
+        (state.streams || []).forEach(s => {
+            if (s.status === 'active') {
+                active.add(s.node_id + ':' + s.repeater_id);
+            }
+        });
+        return active;
+    }
+
+    // Build map of node_id -> [lat, lon] for server locations
+    function getNodeCoords() {
+        const coords = {};
+        state.nodes.forEach(n => {
+            const lat = parseFloat(n.latitude);
+            const lon = parseFloat(n.longitude);
+            if (lat && lon && !(lat === 0 && lon === 0)) {
+                coords[n.node_id] = [lat, lon];
+            }
+        });
+        return coords;
+    }
+
+    function updateMap() {
+        // Clear all layers
+        markers.forEach(m => map.removeLayer(m));
+        markers = [];
+        serverMarkers.forEach(m => map.removeLayer(m));
+        serverMarkers = [];
+        connectionLines.forEach(l => map.removeLayer(l));
+        connectionLines = [];
+
+        const bounds = [];
+        const activeRepeaters = getActiveRepeaters();
+        const nodeCoords = getNodeCoords();
+
+        // --- Server markers ---
+        state.nodes.forEach((n, i) => {
+            const coords = nodeCoords[n.node_id];
+            if (!coords) return;
+
+            const color = nodeColors[i % nodeColors.length] || '#38bdf8';
+            const icon = L.divIcon({
+                className: '',
+                html: `<div class="server-marker" style="background:#1e293b;border:2px solid ${color};width:16px;height:16px;">` +
+                      `<div class="server-marker-inner" style="background:${color};"></div></div>`,
+                iconSize: [16, 16],
+                iconAnchor: [8, 8]
+            });
+
+            const marker = L.marker(coords, { icon, zIndexOffset: 1000 }).addTo(map);
+            const status = n.connected ? (n.hblink_connected ? 'Online' : 'Partial') : 'Offline';
+            const label = n.location || n.node_name || n.node_id;
+            marker.bindPopup(
+                `<div class="map-popup-name">${n.node_name || n.node_id}</div>` +
+                (n.location ? `<div class="map-popup-detail">${n.location}</div>` : '') +
+                `<div class="map-popup-detail">Host: ${n.host}:${n.port}</div>` +
+                `<div class="map-popup-detail">Status: ${status}</div>` +
+                `<div class="map-popup-detail">Repeaters: ${n.repeater_count || 0}</div>`
+            );
+            marker.bindTooltip(label, {
+                permanent: true, direction: 'right', offset: [12, 0],
+                className: 'server-label'
+            });
+            marker._nodeId = n.node_id;
+            serverMarkers.push(marker);
+            bounds.push(coords);
+        });
+
+        // --- Cluster peer lines (server-to-server) ---
+        const drawnPeerLinks = new Set();
+        state.nodes.forEach(n => {
+            const fromCoords = nodeCoords[n.node_id];
+            if (!fromCoords || !n.cluster || !n.cluster.peers) return;
+            n.cluster.peers.forEach(p => {
+                const toCoords = nodeCoords[p.node_id];
+                if (!toCoords) return;
+                // Deduplicate: only draw once per pair
+                const linkKey = [n.node_id, p.node_id].sort().join(':');
+                if (drawnPeerLinks.has(linkKey)) return;
+                drawnPeerLinks.add(linkKey);
+                const alive = p.connected && p.alive;
+                const line = L.polyline([fromCoords, toCoords], {
+                    color: alive ? '#22c55e' : '#ef4444',
+                    weight: 2.5,
+                    opacity: alive ? 0.7 : 0.4,
+                    dashArray: alive ? null : '6 4'
+                }).addTo(map);
+                const latStr = p.latency_ms != null ? p.latency_ms.toFixed(1) + 'ms' : '?';
+                line.bindPopup(
+                    `<div class="map-popup-name">Cluster Link</div>` +
+                    `<div class="map-popup-detail">${n.node_id} ↔ ${p.node_id}</div>` +
+                    `<div class="map-popup-detail">Status: ${alive ? 'Connected' : 'Down'}</div>` +
+                    `<div class="map-popup-detail">Latency: ${latStr}</div>`
+                );
+                connectionLines.push(line);
+            });
+        });
+
+        // --- Repeater markers + connection lines ---
+        state.repeaters.forEach(r => {
+            const det = r.details || {};
+            const lat = parseFloat(det.latitude || r.latitude);
+            const lon = parseFloat(det.longitude || r.longitude);
+            if (!lat || !lon || (lat === 0 && lon === 0)) return;
+
+            const nodeIdx = state.nodes.findIndex(n => n.node_id === r.node_id);
+            const color = nodeColors[nodeIdx % nodeColors.length] || '#38bdf8';
+            const isActive = activeRepeaters.has(r.node_id + ':' + r.repeater_id);
+
+            const marker = L.circleMarker([lat, lon], {
+                radius: isActive ? 9 : 7,
+                fillColor: isActive ? '#22c55e' : color,
+                color: isActive ? '#16a34a' : '#0f172a',
+                weight: 2,
+                fillOpacity: isActive ? 1.0 : 0.9
+            }).addTo(map);
+
+            const callsign = r.callsign || `ID ${r.repeater_id}`;
+            const connType = r.connection_type || 'unknown';
+            marker.bindPopup(
+                `<div class="map-popup-name">${callsign}</div>` +
+                `<div class="map-popup-detail">${connType} @ ${r.node_name || r.node_id}</div>` +
+                `<div class="map-popup-detail">ID: ${r.repeater_id}</div>`
+            );
+            // Repeater label tooltip (callsign)
+            marker.bindTooltip(callsign, {
+                permanent: true, direction: 'right', offset: [10, 0],
+                className: 'server-label'
+            });
+            markers.push(marker);
+            bounds.push([lat, lon]);
+
+            // Draw line from server to repeater
+            const serverCoords = nodeCoords[r.node_id];
+            if (serverCoords) {
+                const line = L.polyline([serverCoords, [lat, lon]], {
+                    color: isActive ? '#22c55e' : color,
+                    weight: isActive ? 3 : 1.5,
+                    opacity: isActive ? 0.9 : 0.3,
+                    dashArray: isActive ? null : '4 6'
+                }).addTo(map);
+                connectionLines.push(line);
+            }
+        });
+
+        if (bounds.length > 0 && !mapInitialBoundsFit) {
+            map.fitBounds(bounds, { padding: [30, 30], maxZoom: 10 });
+            mapInitialBoundsFit = true;
+        }
+        updateLabelVisibility();
+    }
+
+    function updateLabelVisibility() {
+        if (!map) return;
+        const zoom = map.getZoom();
+        const allLabeled = serverMarkers.concat(markers);
+
+        // Low zoom: hide all labels
+        if (zoom <= 5) {
+            allLabeled.forEach(m => { if (m.getTooltip()) m.closeTooltip(); });
+            return;
+        }
+        // High zoom: show all
+        if (zoom >= 9) {
+            allLabeled.forEach(m => { if (m.getTooltip()) m.openTooltip(); });
+            return;
+        }
+        // Medium zoom: collision avoidance — servers first (priority), then repeaters
+        const occupied = [];
+        const MIN_DIST = 80;
+        allLabeled.forEach(m => {
+            if (!m.getTooltip()) return;
+            const pt = map.latLngToContainerPoint(m.getLatLng());
+            let collides = false;
+            for (const occ of occupied) {
+                const dx = pt.x - occ.x, dy = pt.y - occ.y;
+                if (Math.sqrt(dx * dx + dy * dy) < MIN_DIST) { collides = true; break; }
+            }
+            if (collides) { m.closeTooltip(); }
+            else { m.openTooltip(); occupied.push({ x: pt.x, y: pt.y }); }
+        });
+    }
+
+    // --- Stats ---
+
+    function updateStats() {
+        const s = state.stats;
+        const dur = (s.total_duration_today || 0);
+        const durStr = dur >= 3600 ? (dur / 3600).toFixed(1) + 'h' : dur >= 60 ? (dur / 60).toFixed(1) + 'm' : dur.toFixed(0) + 's';
+        document.getElementById('statsBar').innerHTML = `
+            <div class="stat-card"><div class="stat-label">Nodes Online</div><div class="stat-value">${s.nodes_online || 0}/${s.nodes_total || 0}</div></div>
+            <div class="stat-card"><div class="stat-label">Repeaters Connected</div><div class="stat-value">${s.repeaters_connected || 0}</div></div>
+            <div class="stat-card"><div class="stat-label">Active Streams</div><div class="stat-value">${s.active_streams || 0}</div></div>
+            <div class="stat-card"><div class="stat-label">Calls Today</div><div class="stat-value">${s.total_calls_today || 0}</div></div>
+            <div class="stat-card"><div class="stat-label">Traffic Today</div><div class="stat-value">${durStr}</div></div>
+        `;
+    }
+
+    // --- Node Health ---
+
+    function updateNodeHealth() {
+        const container = document.getElementById('nodeHealth');
+        if (!state.nodes || state.nodes.length === 0) {
+            container.innerHTML = '<div style="color: #64748b; font-size: 13px;">No nodes configured</div>';
+            return;
+        }
+        container.innerHTML = state.nodes.map(n => {
+            const status = n.connected ? (n.hblink_connected ? 'online' : 'partial') : 'offline';
+            const statusLabel = n.connected ? (n.hblink_connected ? 'ONLINE' : 'WS OK / HBLINK DOWN') : 'OFFLINE';
+
+            // Cluster peers
+            let clusterHtml = '';
+            if (n.cluster && n.cluster.peers && n.cluster.peers.length > 0) {
+                const peers = n.cluster.peers.map(p => {
+                    const alive = p.connected && p.alive;
+                    const dot = alive ? 'alive' : 'dead';
+                    const lat = p.latency_ms != null ? p.latency_ms.toFixed(1) + 'ms' : '?';
+                    return `<span class="cluster-peer"><span class="cluster-peer-dot ${dot}"></span>Node ${p.node_id} ${lat}</span>`;
+                }).join('');
+                clusterHtml = `<div class="cluster-peers"><div class="cluster-peers-label">Cluster Peers</div>${peers}</div>`;
+            }
+
+            return `<div class="node-card ${status}">
+                <div class="node-card-header">
+                    <span class="node-card-name">${n.node_name || n.node_id}</span>
+                    <span class="node-status-dot ${status}">${statusLabel}</span>
+                </div>
+                <div class="node-card-details">
+                    <span class="cl">Repeaters</span><span class="cv">${n.repeater_count || 0}</span>
+                    <span class="cl">Active Streams</span><span class="cv">${n.active_streams || 0}</span>
+                    <span class="cl">Calls Today</span><span class="cv">${n.stats?.total_calls_today || 0}</span>
+                    <span class="cl">Host</span><span class="cv">${n.host}:${n.port}</span>
+                </div>
+                ${clusterHtml}
+            </div>`;
+        }).join('');
+    }
+
+    // --- Node Badges ---
+
+    function updateNodeBadges() {
+        const badges = document.getElementById('nodeBadges');
+        const wsEl = document.getElementById('wsStatus');
+        let html = '';
+        (state.nodes || []).forEach(n => {
+            const cls = n.connected ? (n.hblink_connected ? 'online' : 'partial') : 'offline';
+            html += `<span class="node-badge ${cls}">${n.node_name || n.node_id}</span>`;
+        });
+        // Keep wsStatus element at the end
+        badges.innerHTML = html;
+        badges.appendChild(wsEl);
+    }
+
+    // --- Traffic ---
+
+    function updateTraffic() {
+        const container = document.getElementById('trafficGrid');
+        if (!state.nodes || state.nodes.length === 0) { container.innerHTML = ''; return; }
+
+        const maxCalls = Math.max(1, ...state.nodes.map(n => n.stats?.total_calls_today || 0));
+        const maxDur = Math.max(1, ...state.nodes.map(n => n.stats?.total_duration_today || 0));
+
+        container.innerHTML = state.nodes.map((n, i) => {
+            const calls = n.stats?.total_calls_today || 0;
+            const dur = n.stats?.total_duration_today || 0;
+            const streams = n.active_streams || 0;
+            const durStr = dur >= 3600 ? (dur/3600).toFixed(1)+'h' : dur >= 60 ? (dur/60).toFixed(1)+'m' : dur.toFixed(0)+'s';
+            const color = nodeColors[i % nodeColors.length];
+
+            return `<div class="traffic-card">
+                <div class="traffic-card-name" style="color:${color}">${n.node_name || n.node_id}</div>
+                <div class="traffic-bar-container">
+                    <div class="traffic-bar-label"><span>Calls</span><span>${calls}</span></div>
+                    <div class="traffic-bar"><div class="traffic-bar-fill calls" style="width:${(calls/maxCalls*100).toFixed(1)}%;background:${color}"></div></div>
+                </div>
+                <div class="traffic-bar-container">
+                    <div class="traffic-bar-label"><span>Duration</span><span>${durStr}</span></div>
+                    <div class="traffic-bar"><div class="traffic-bar-fill duration" style="width:${(dur/maxDur*100).toFixed(1)}%"></div></div>
+                </div>
+                <div class="traffic-bar-container">
+                    <div class="traffic-bar-label"><span>Active Streams</span><span>${streams}</span></div>
+                    <div class="traffic-bar"><div class="traffic-bar-fill streams" style="width:${streams > 0 ? Math.max(10, streams*20) : 0}%"></div></div>
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    // --- Last Heard ---
+
+    function updateLastHeard() {
+        const tbody = document.getElementById('lastHeardBody');
+        if (!state.last_heard || state.last_heard.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" style="color: #64748b; text-align: center;">No activity yet</td></tr>';
+            return;
+        }
+        tbody.innerHTML = state.last_heard.map(lh => {
+            const age = lh.last_heard ? (Date.now()/1000 - lh.last_heard) : 999;
+            const active = (lh.active && age < 30) ? '<span class="active-indicator"></span>' : '';
+            const ts = lh.timestamp ? formatTime(lh.timestamp) : '';
+            const callsign = lh.callsign || '?';
+            const radioId = lh.radio_id || lh.src_id || '?';
+            const tg = lh.dst_id || lh.talkgroup || '?';
+            const slot = lh.slot || '?';
+            const node = lh.node_name || lh.node_id || '';
+            return `<tr>
+                <td>${active}</td>
+                <td><span class="callsign">${callsign}</span></td>
+                <td>${radioId}</td>
+                <td><span class="node-tag">${node}</span></td>
+                <td><span class="tg-badge">TG ${tg}</span></td>
+                <td>TS${slot}</td>
+                <td>${ts}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    // --- Repeaters ---
+
+    function updateRepeaters() {
+        const container = document.getElementById('repeatersContainer');
+        if (!state.repeaters || state.repeaters.length === 0) {
+            container.innerHTML = '<div style="color: #64748b; font-size: 13px;">No repeaters connected</div>';
+            return;
+        }
+
+        // Group by node
+        const byNode = {};
+        state.repeaters.forEach(r => {
+            const nid = r.node_id || 'unknown';
+            if (!byNode[nid]) byNode[nid] = [];
+            byNode[nid].push(r);
+        });
+
+        let html = '';
+        Object.entries(byNode).forEach(([nid, reps]) => {
+            const nodeName = reps[0]?.node_name || nid;
+            html += `<div class="repeater-group">`;
+            html += `<div class="repeater-group-header">${nodeName} (${reps.length})</div>`;
+            reps.sort((a, b) => (a.callsign || '').localeCompare(b.callsign || ''));
+            reps.forEach(r => {
+                const callsign = r.callsign || `ID ${r.repeater_id}`;
+                const connType = r.connection_type || 'unknown';
+                const typeClass = connType === 'hotspot' ? 'hotspot' : connType === 'network' ? 'network' : 'repeater';
+                const det = r.details || {};
+                const loc = r.location || det.location || '';
+                html += `<div class="repeater-mini">
+                    <div class="repeater-mini-left">
+                        <span class="repeater-mini-callsign">${callsign}</span>
+                        <span class="repeater-mini-id">${r.repeater_id}</span>
+                        <span class="repeater-mini-type ${typeClass}">${connType}</span>
+                    </div>
+                    <div class="repeater-mini-right">
+                        ${loc ? `<span>${loc}</span>` : ''}
+                    </div>
+                </div>`;
+            });
+            html += `</div>`;
+        });
+        container.innerHTML = html;
+    }
+
+    // --- Events ---
+
+    function updateEvents() {
+        const container = document.getElementById('eventsLog');
+        if (!state.events || state.events.length === 0) {
+            container.innerHTML = '<div style="color: #64748b; font-size: 13px; padding: 8px;">No events yet</div>';
+            return;
+        }
+        container.innerHTML = state.events.slice(0, 50).map(ev => {
+            const t = ev.timestamp ? formatTime(ev.timestamp) : '';
+            const node = ev.node_name || ev.node_id || '';
+            const d = ev.data || {};
+            const etype = ev.type || '';
+            let typeLabel = '', typeClass = '', detail = '';
+
+            if (etype === 'stream_start') {
+                typeLabel = 'START';
+                typeClass = 'start';
+                detail = `${d.callsign || d.src_id || '?'} → TG ${d.dst_id || '?'} TS${d.slot || '?'}`;
+            } else if (etype === 'stream_end') {
+                typeLabel = 'END';
+                typeClass = 'end';
+                const dur = d.duration != null ? d.duration.toFixed(1) + 's' : '';
+                detail = `${d.callsign || d.src_id || '?'} ${dur}`;
+            } else {
+                typeLabel = etype.replace(/_/g, ' ').toUpperCase();
+                detail = JSON.stringify(d).substring(0, 80);
+            }
+
+            return `<div class="event-row">
+                <span class="event-time">${t}</span>
+                <span class="event-node"><span class="node-tag">${node}</span></span>
+                <span class="event-type ${typeClass}">${typeLabel}</span>
+                <span class="event-detail">${detail}</span>
+            </div>`;
+        }).join('');
+    }
+
+    // --- Helpers ---
+
+    function formatTime(ts) {
+        const d = new Date(ts * 1000);
+        return d.toLocaleTimeString();
+    }
+
+    function renderAll() {
+        updateStats();
+        updateNodeHealth();
+        updateNodeBadges();
+        updateTraffic();
+        updateLastHeard();
+        updateRepeaters();
+        updateEvents();
+        updateMap();
+    }
+
+    // --- WebSocket ---
+
+    function connectWebSocket() {
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = `${protocol}//${location.host}/ws`;
+        ws = new WebSocket(url);
+
+        ws.onopen = () => {
+            const el = document.getElementById('wsStatus');
+            el.className = 'ws-status connected';
+            el.textContent = 'Connected';
+            if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
+        };
+
+        ws.onclose = () => {
+            const el = document.getElementById('wsStatus');
+            el.className = 'ws-status disconnected';
+            el.textContent = 'Reconnecting...';
+            reconnectTimeout = setTimeout(connectWebSocket, 3000);
+        };
+
+        ws.onerror = () => {};
+
+        ws.onmessage = (event) => {
+            let msg;
+            try { msg = JSON.parse(event.data); } catch { return; }
+            if (msg === 'pong') return;
+
+            const type = msg.type;
+            const data = msg.data || {};
+
+            if (type === 'initial_state' || type === 'full_refresh') {
+                state.nodes = data.nodes || [];
+                state.repeaters = data.repeaters || [];
+                // Tag initial streams with _key for cleanup on stream_end
+                state.streams = (data.streams || []).map(s => ({
+                    ...s,
+                    _key: (s.node_id || '') + ':' + (s.repeater_id || '') + '.' + (s.slot || 0)
+                }));
+                state.stats = data.stats || {};
+                state.last_heard = data.last_heard || [];
+                state.events = data.events || [];
+                mapInitialBoundsFit = false;  // re-fit bounds on reconnect
+                if (data.region_name) {
+                    document.getElementById('regionBadge').textContent = data.region_name;
+                }
+                renderAll();
+                return;
+            }
+
+            if (type === 'node_status') {
+                // Update node connected status
+                const node = state.nodes.find(n => n.node_id === data.node_id);
+                if (node) {
+                    node.connected = data.connected;
+                    updateNodeHealth();
+                    updateNodeBadges();
+                    // Recompute stats
+                    state.stats.nodes_online = state.nodes.filter(n => n.connected).length;
+                    updateStats();
+                }
+                return;
+            }
+
+            // Incremental events tagged with node_id
+            const nodeId = msg.node_id;
+            const nodeName = msg.node_name;
+
+            if (type === 'stream_start' || type === 'stream_end') {
+                // Track active streams for map highlighting
+                const streamKey = nodeId + ':' + (data.repeater_id || '') + '.' + (data.slot || 0);
+                if (type === 'stream_start') {
+                    state.streams.push({...data, node_id: nodeId, status: 'active', _key: streamKey});
+                } else {
+                    state.streams = state.streams.filter(s => s._key !== streamKey);
+                }
+
+                // Update events log
+                state.events.unshift({...msg, node_id: nodeId, node_name: nodeName});
+                if (state.events.length > 50) state.events.length = 50;
+                updateEvents();
+
+                // Update last_heard if included
+                if (msg.last_heard) {
+                    // Merge into state.last_heard
+                    mergeLastHeard(nodeId, nodeName, msg.last_heard);
+                    updateLastHeard();
+                }
+
+                // Update node stats
+                if (type === 'stream_end' && !data.is_assumed) {
+                    const node = state.nodes.find(n => n.node_id === nodeId);
+                    if (node && node.stats) {
+                        node.stats.total_calls_today = (node.stats.total_calls_today || 0) + 1;
+                        node.stats.total_duration_today = (node.stats.total_duration_today || 0) + (data.duration || 0);
+                    }
+                    recomputeAggStats();
+                    updateStats();
+                    updateTraffic();
+                }
+
+                // Refresh map to update line/marker colors
+                updateMap();
+            }
+
+            if (type === 'repeater_connected') {
+                state.repeaters.push({...data, node_id: nodeId, node_name: nodeName});
+                const node = state.nodes.find(n => n.node_id === nodeId);
+                if (node) node.repeater_count = (node.repeater_count || 0) + 1;
+                updateRepeaters();
+                updateNodeHealth();
+                recomputeAggStats();
+                updateStats();
+            }
+
+            if (type === 'repeater_disconnected') {
+                state.repeaters = state.repeaters.filter(r => !(r.node_id === nodeId && r.repeater_id === data.repeater_id));
+                const node = state.nodes.find(n => n.node_id === nodeId);
+                if (node) node.repeater_count = Math.max(0, (node.repeater_count || 1) - 1);
+                updateRepeaters();
+                updateNodeHealth();
+                recomputeAggStats();
+                updateStats();
+            }
+
+            if (type === 'repeater_details') {
+                const r = state.repeaters.find(x => x.node_id === nodeId && x.repeater_id === data.repeater_id);
+                if (r) {
+                    r.details = data;
+                    updateRepeaters();
+                    updateMap();
+                }
+            }
+
+            if (type === 'cluster_state') {
+                const node = state.nodes.find(n => n.node_id === nodeId);
+                if (node) { node.cluster = data; updateNodeHealth(); }
+            }
+
+            if (type === 'hblink_status') {
+                const node = state.nodes.find(n => n.node_id === nodeId);
+                if (node) { node.hblink_connected = data.connected; updateNodeHealth(); updateNodeBadges(); }
+            }
+        };
+
+        // Keepalive
+        setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping'); }, 30000);
+    }
+
+    function mergeLastHeard(nodeId, nodeName, nodeLH) {
+        // Remove old entries from this node, add new ones tagged
+        state.last_heard = state.last_heard.filter(lh => lh.node_id !== nodeId);
+        nodeLH.forEach(lh => {
+            state.last_heard.push({...lh, node_id: nodeId, node_name: nodeName});
+        });
+        // Dedup by radio_id, keep most recent
+        const seen = {};
+        state.last_heard.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        state.last_heard = state.last_heard.filter(lh => {
+            const rid = lh.radio_id || lh.src_id;
+            if (seen[rid]) return false;
+            seen[rid] = true;
+            return true;
+        }).slice(0, 20);
+    }
+
+    function recomputeAggStats() {
+        let calls = 0, dur = 0, retx = 0, reps = 0, streams = 0, online = 0;
+        state.nodes.forEach(n => {
+            calls += n.stats?.total_calls_today || 0;
+            dur += n.stats?.total_duration_today || 0;
+            retx += n.stats?.retransmitted_calls || 0;
+            reps += n.repeater_count || 0;
+            streams += n.active_streams || 0;
+            if (n.connected) online++;
+        });
+        state.stats = {
+            total_calls_today: calls, total_duration_today: dur, retransmitted_calls: retx,
+            repeaters_connected: reps, active_streams: streams,
+            nodes_online: online, nodes_total: state.nodes.length
+        };
+    }
+
+    // --- Init ---
+
+    async function init() {
+        // Load config
+        try {
+            const resp = await fetch('/api/config');
+            const cfg = await resp.json();
+            document.title = cfg.dashboard_title || 'DMR Nexus Regional';
+            document.getElementById('dashTitle').textContent = cfg.dashboard_title || 'DMR Nexus Regional';
+            document.getElementById('regionBadge').textContent = cfg.region_name || '';
+        } catch (e) {}
+
+        initMap();
+        connectWebSocket();
+    }
+
+    init();
+    </script>
+</body>
+</html>

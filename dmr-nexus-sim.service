@@ -12,6 +12,9 @@ ExecStart=/opt/dmr-nexus/venv/bin/python /opt/dmr-nexus/tools/test_repeater.py \
   -s 127.0.0.1 \
   --base-id ${BASE_ID} \
   --callsign-prefix ${CALLSIGN} \
+  --latitude ${LATITUDE} \
+  --longitude ${LONGITUDE} \
+  --location "${LOCATION}" \
   --no-traffic
 Restart=always
 RestartSec=10

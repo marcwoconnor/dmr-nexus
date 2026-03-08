@@ -9,12 +9,12 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from hblink4.cluster_protocol import (
+from nexus.cluster_protocol import (
     Token, TokenManager, NATIVE_MAGIC, CMD_AUTH, CMD_AUTH_ACK, CMD_AUTH_NAK,
     CMD_SUBSCRIBE, CMD_PING, CMD_PONG, CMD_DATA, CMD_DISCONNECT, CMD_SUB_ACK,
     DEFAULT_TOKEN_TTL,
 )
-from hblink4.subscriptions import SubscriptionStore, Subscription
+from nexus.subscriptions import SubscriptionStore, Subscription
 
 
 # ========== Token Tests (Phase 5.1) ==========

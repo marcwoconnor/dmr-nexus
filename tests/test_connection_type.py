@@ -5,10 +5,10 @@ import unittest
 import sys
 import os
 
-# Add the hblink4 module to the path
+# Add the nexus module to the path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hblink4.utils import detect_connection_type
+from nexus.utils import detect_connection_type
 
 
 class TestConnectionTypeDetection(unittest.TestCase):

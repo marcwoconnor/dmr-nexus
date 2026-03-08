@@ -9,7 +9,7 @@ Built the TCP mesh cluster bus and state advertisement — the foundation all su
 #### New Files
 | File | Lines | Purpose |
 |------|-------|---------|
-| `hblink4/cluster.py` | ~400 | TCP mesh cluster bus: peer connections, HMAC-SHA256 auth, heartbeats, JSON+binary framing |
+| `nexus/cluster.py` | ~400 | TCP mesh cluster bus: peer connections, HMAC-SHA256 auth, heartbeats, JSON+binary framing |
 | `tests/test_cluster.py` | ~200 | 12 tests: unit + integration with real TCP connections |
 | `docs/clustering_todo.md` | ~300 | Markdown TODO checklist for all 6 phases |
 | `docs/generate_todo_docx.py` | ~200 | Word document generator for printable checklist |
@@ -18,7 +18,7 @@ Built the TCP mesh cluster bus and state advertisement — the foundation all su
 #### Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/hblink.py` | ClusterBus import/init/startup/shutdown, cluster message handler, repeater_up/down broadcasts, _cluster_state dict, full state sync on peer connect |
+| `nexus/hblink.py` | ClusterBus import/init/startup/shutdown, cluster message handler, repeater_up/down broadcasts, _cluster_state dict, full state sync on peer connect |
 | `config/config_sample.json` | Added `cluster` config section |
 | `tests/test_access_control.py` | Complete rewrite — self-contained test data (was: 9 tests, 5 failing; now: 31 tests, all passing) |
 
@@ -58,9 +58,9 @@ The core clustering value: DMR transmissions now cross server boundaries.
 #### Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/models.py` | Added `source_node` field to StreamState |
-| `hblink4/cluster.py` | Added `send_stream_start()`, `send_stream_data()`, `send_stream_end()` helpers |
-| `hblink4/hblink.py` | Target calc cluster loop, `local_only` param, virtual stream handlers, cluster forwarding in `_forward_stream`, stream_end cluster notification, peer disconnect virtual stream cleanup |
+| `nexus/models.py` | Added `source_node` field to StreamState |
+| `nexus/cluster.py` | Added `send_stream_start()`, `send_stream_data()`, `send_stream_end()` helpers |
+| `nexus/hblink.py` | Target calc cluster loop, `local_only` param, virtual stream handlers, cluster forwarding in `_forward_stream`, stream_end cluster notification, peer disconnect virtual stream cleanup |
 | `tests/test_cluster.py` | 19 new tests: target calc (8), virtual streams (7), stream protocol over TCP (4) |
 
 #### Sub-phase Details
@@ -94,7 +94,7 @@ Resilience layer: dead peer cleanup, stale virtual stream timeout, ordered shutd
 #### Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/hblink.py` | `_draining` flag, `_draining_peers` set, RPTL rejection during drain, skip draining peers in target calc, virtual stream stale cleanup in `_check_stream_timeouts`, async `graceful_shutdown()` replacing sync `cleanup()`, `node_draining`/`node_down` cluster message handlers, `_count_active_streams()`, async signal handler |
+| `nexus/hblink.py` | `_draining` flag, `_draining_peers` set, RPTL rejection during drain, skip draining peers in target calc, virtual stream stale cleanup in `_check_stream_timeouts`, async `graceful_shutdown()` replacing sync `cleanup()`, `node_draining`/`node_down` cluster message handlers, `_count_active_streams()`, async signal handler |
 | `tests/test_cluster.py` | 8 new tests: draining exclusion (2), virtual stream timeout (2), graceful shutdown broadcast ordering (1), node_draining/node_down handlers (3) |
 
 #### Sub-phase Details
@@ -124,8 +124,8 @@ Cross-server user cache: local user_heard events are batched, throttled, and bro
 #### Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/user_cache.py` | `source_node` field on UserEntry, broadcast callback + queue, throttled `flush_broadcast()`, `merge_remote()`, `set_broadcast_callback()`, cleanup flushes queue |
-| `hblink4/hblink.py` | `user_heard` cluster message handler, broadcast callback wired up on cluster bus start |
+| `nexus/user_cache.py` | `source_node` field on UserEntry, broadcast callback + queue, throttled `flush_broadcast()`, `merge_remote()`, `set_broadcast_callback()`, cleanup flushes queue |
+| `nexus/hblink.py` | `user_heard` cluster message handler, broadcast callback wired up on cluster bus start |
 | `tests/test_cluster.py` | 12 new tests: source_node tracking, broadcast queue/throttle/batch, merge_remote, local-overwrites-remote, to_dict |
 
 #### Test Results
@@ -140,7 +140,7 @@ Backend plumbing for cluster visibility in the dashboard.
 #### Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/hblink.py` | `_emit_cluster_state()` helper, 8 call sites (peer connect/disconnect, sync_state, repeater_up/down, node_draining/down, _send_initial_state) |
+| `nexus/hblink.py` | `_emit_cluster_state()` helper, 8 call sites (peer connect/disconnect, sync_state, repeater_up/down, node_draining/down, _send_initial_state) |
 | `dashboard/server.py` | `DashboardState.cluster` field, `cluster_state` event handler, `cluster` in WebSocket initial_state, `/api/cluster` REST endpoint |
 | `tests/test_cluster.py` | 5 new tests: emit output, draining flag, noop without bus, zero repeaters, dashboard storage |
 
@@ -162,7 +162,7 @@ Live config reload and operational management socket.
 #### Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/hblink.py` | `CONFIG_FILE` global, `_reload_config()` method (re-read config, rebuild matcher, re-evaluate repeaters, update config hash), SIGHUP handler, management Unix socket server with 5 commands (status/cluster/repeaters/reload/drain) |
+| `nexus/hblink.py` | `CONFIG_FILE` global, `_reload_config()` method (re-read config, rebuild matcher, re-evaluate repeaters, update config hash), SIGHUP handler, management Unix socket server with 5 commands (status/cluster/repeaters/reload/drain) |
 | `tests/test_cluster.py` | 5 new tests: reload no-file, rebuild matcher, disconnect blacklisted, emit event, mgmt socket roundtrip |
 
 #### Test Results
@@ -178,14 +178,14 @@ Cluster-native client protocol with stateless token auth and client-driven TG su
 #### New Files
 | File | Lines | Purpose |
 |------|-------|---------|
-| `hblink4/cluster_protocol.py` | ~200 | Token, TokenManager, HMAC-SHA256 signing, wire format constants |
-| `hblink4/subscriptions.py` | ~160 | SubscriptionStore with config validation, cluster replication |
+| `nexus/cluster_protocol.py` | ~200 | Token, TokenManager, HMAC-SHA256 signing, wire format constants |
+| `nexus/subscriptions.py` | ~160 | SubscriptionStore with config validation, cluster replication |
 | `tests/test_native_protocol.py` | ~240 | 29 tests: tokens (13) + subscriptions (16) |
 
 #### Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/hblink.py` | Dual-protocol dispatch (CLNT magic), TokenManager+SubscriptionStore init, 6 native handlers (auth/subscribe/ping/data/disconnect), subscription cluster messages, broadcast wiring |
+| `nexus/hblink.py` | Dual-protocol dispatch (CLNT magic), TokenManager+SubscriptionStore init, 6 native handlers (auth/subscribe/ping/data/disconnect), subscription cluster messages, broadcast wiring |
 
 #### Test Results
 - **172 tests total, 172 passing, 0 failures**
@@ -200,7 +200,7 @@ Bridges HomeBrew repeaters into the subscription-based routing system so both pr
 #### Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/hblink.py` | `_create_homebrew_subscription()`, native client loop in `_calculate_stream_targets()`, native forwarding in `_forward_stream()`, subscription cleanup in `_remove_repeater()` |
+| `nexus/hblink.py` | `_create_homebrew_subscription()`, native client loop in `_calculate_stream_targets()`, native forwarding in `_forward_stream()`, subscription cleanup in `_remove_repeater()` |
 | `tests/test_cluster.py` | 9 new tests: proxy subscription (4), native target calc (4), native forwarding (1). Added `_native_clients`+`_subscriptions` to routing test mock |
 
 #### Test Results
@@ -218,7 +218,7 @@ Enhanced PONG response with full cluster health for fast client failover.
 #### Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/hblink.py` | Enhanced `_handle_native_ping()` PONG: node_id, active_streams, connected_repeaters, per-peer status/load, preferred_server hint |
+| `nexus/hblink.py` | Enhanced `_handle_native_ping()` PONG: node_id, active_streams, connected_repeaters, per-peer status/load, preferred_server hint |
 | `tests/test_cluster.py` | 9 new tests: node_id (2), active_streams, peer status alive/draining/dead, preferred_server selection, no preferred when all draining, redirect on drain |
 
 #### Test Results
@@ -235,7 +235,7 @@ Server-side stream dedup for clients connected to multiple servers simultaneousl
 #### Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/hblink.py` | `_is_stream_active_locally()`, dedup in `_handle_virtual_stream_start()`, stale virtual cleanup in `_handle_stream_start()` |
+| `nexus/hblink.py` | `_is_stream_active_locally()`, dedup in `_handle_virtual_stream_start()`, stale virtual cleanup in `_handle_stream_start()` |
 | `tests/test_cluster.py` | 6 new tests: virtual stream suppression (3), `_is_stream_active_locally` (2), stale virtual cleanup (1) |
 
 #### Test Results
@@ -252,13 +252,13 @@ Inter-region gateway bus with TG-based routing table for global scale.
 #### New Files
 | File | Lines | Purpose |
 |------|-------|---------|
-| `hblink4/backbone.py` | ~500 | BackboneBus, TalkgroupRoutingTable, RegionalTGSummary |
+| `nexus/backbone.py` | ~500 | BackboneBus, TalkgroupRoutingTable, RegionalTGSummary |
 | `tests/test_backbone.py` | ~300 | 20 tests: TG routing, TG summary, bus init, TCP integration |
 
 #### Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/hblink.py` | BackboneBus init, `_handle_backbone_message()`, `_advertise_tg_summary()`, backbone stream handlers, backbone targets in `_calculate_stream_targets()` + `_forward_stream()` + `_end_stream()`, TG re-advertisement on repeater up/down, backbone shutdown |
+| `nexus/hblink.py` | BackboneBus init, `_handle_backbone_message()`, `_advertise_tg_summary()`, backbone stream handlers, backbone targets in `_calculate_stream_targets()` + `_forward_stream()` + `_end_stream()`, TG re-advertisement on repeater up/down, backbone shutdown |
 | `config/config_sample.json` | `cluster.region`+`cluster.role` fields, `backbone` config section |
 | `tests/test_cluster.py` | 4 new backbone target calc tests, `_backbone_bus`+`_region_id` on test mocks |
 
@@ -277,15 +277,15 @@ Private call routing via user cache + cross-region lookup through backbone gatew
 #### New Classes
 | Class | File | Purpose |
 |-------|------|---------|
-| `CrossRegionUserEntry` | `hblink4/backbone.py` | Cached cross-region user location (positive/negative) |
-| `UserLookupService` | `hblink4/backbone.py` | Pull-model cross-region lookup: query, respond, cache (60s positive / 30s negative TTL) |
+| `CrossRegionUserEntry` | `nexus/backbone.py` | Cached cross-region user location (positive/negative) |
+| `UserLookupService` | `nexus/backbone.py` | Pull-model cross-region lookup: query, respond, cache (60s positive / 30s negative TTL) |
 
 #### Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/user_cache.py` | `region_id` field on `UserEntry`, included in `to_dict()` |
-| `hblink4/backbone.py` | `CrossRegionUserEntry` dataclass + `UserLookupService` class (~120 lines) |
-| `hblink4/hblink.py` | Private call routing in `_handle_stream_start` (replaces rejection), `_private_call_local_targets` helper, `user_lookup_query`/`user_lookup_response` backbone handlers, `UserLookupService` init + cleanup wiring, private call handling in virtual stream paths |
+| `nexus/user_cache.py` | `region_id` field on `UserEntry`, included in `to_dict()` |
+| `nexus/backbone.py` | `CrossRegionUserEntry` dataclass + `UserLookupService` class (~120 lines) |
+| `nexus/hblink.py` | Private call routing in `_handle_stream_start` (replaces rejection), `_private_call_local_targets` helper, `user_lookup_query`/`user_lookup_response` backbone handlers, `UserLookupService` init + cleanup wiring, private call handling in virtual stream paths |
 | `tests/test_backbone.py` | 13 new tests: `TestUserLookupServiceCache` (9), `TestUserLookupQueryRespond` (4) |
 | `tests/test_cluster.py` | 10 new tests: `TestPrivateCallRouting` (6), `TestPrivateCallLocalTargets` (4) |
 | `tests/test_user_cache.py` | 2 new tests: `region_id` field behavior |
@@ -337,7 +337,7 @@ Dual gateway per region with automatic priority-based failover.
 #### Changes
 | File | Changes |
 |------|---------|
-| `hblink4/backbone.py` | `priority` field on `BackbonePeerState`, `_get_gateways_for_region()` helper (priority+latency sort), `send_to_region`/`send_binary_to_region` try gateways in priority order, `_handle_peer_disconnect` only removes region TG table when ALL gateways for that region are dead, priority in `get_peer_states()` output |
+| `nexus/backbone.py` | `priority` field on `BackbonePeerState`, `_get_gateways_for_region()` helper (priority+latency sort), `send_to_region`/`send_binary_to_region` try gateways in priority order, `_handle_peer_disconnect` only removes region TG table when ALL gateways for that region are dead, priority in `get_peer_states()` output |
 | `config/config_sample.json` | Dual gateway example with priority field |
 | `tests/test_backbone.py` | 9 new tests: priority loading, sorted gateway retrieval, primary preference, failover to secondary, binary failover, TG table preserved on partial disconnect, TG table removed on full disconnect, priority in peer states |
 
@@ -358,8 +358,8 @@ Two-tier re-election system: latency history, trend-based suggestions, auto-swit
 #### Changes
 | File | Changes |
 |------|---------|
-| `hblink4/backbone.py` | `latency_history` (deque/60) + `consecutive_misses` on `BackbonePeerState`, heartbeat handlers record history + reset misses, `get_latency_stats()` (avg/min/max/jitter/samples), `get_reelection_suggestions()` two-tier (suggest 30%/auto 50%), `_check_reelection()`, `_maybe_auto_switch()` w/ 5min anti-flap, `accept_reelection()` runtime priority swap, `latency_stats` in `get_peer_states()` |
-| `hblink4/hblink.py` | `_emit_backbone_state()` mirrors cluster_state pattern, call sites on connect/disconnect/cleanup, `backbone` + `accept-reelection` mgmt commands |
+| `nexus/backbone.py` | `latency_history` (deque/60) + `consecutive_misses` on `BackbonePeerState`, heartbeat handlers record history + reset misses, `get_latency_stats()` (avg/min/max/jitter/samples), `get_reelection_suggestions()` two-tier (suggest 30%/auto 50%), `_check_reelection()`, `_maybe_auto_switch()` w/ 5min anti-flap, `accept_reelection()` runtime priority swap, `latency_stats` in `get_peer_states()` |
+| `nexus/hblink.py` | `_emit_backbone_state()` mirrors cluster_state pattern, call sites on connect/disconnect/cleanup, `backbone` + `accept-reelection` mgmt commands |
 | `hbctl.py` | `backbone` display w/ latency stats + suggestion banners, `accept-reelection <region>` command, `send_command_data()` for parameterized commands |
 | `dashboard/server.py` | `backbone` state field, `backbone_state` event handler, `/api/backbone` REST endpoint |
 | `tests/test_backbone.py` | 16 new tests: 5 latency tracking + 11 re-election (suggest/auto/anti-flap/accept/routing) |

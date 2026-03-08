@@ -4,7 +4,7 @@ Test user cache functionality
 """
 import pytest
 from time import time, sleep
-from hblink4.user_cache import UserCache, UserEntry
+from nexus.user_cache import UserCache, UserEntry
 
 
 def test_user_cache_basic():

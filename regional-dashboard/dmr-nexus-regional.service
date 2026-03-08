@@ -1,0 +1,20 @@
+[Unit]
+Description=DMR Nexus Regional Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=dmr-nexus
+Group=dmr-nexus
+WorkingDirectory=/opt/dmr-nexus-regional
+ExecStart=/opt/dmr-nexus-regional/venv/bin/python run.py
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dmr-nexus-regional
+
+[Install]
+WantedBy=multi-user.target

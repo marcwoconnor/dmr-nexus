@@ -15,7 +15,7 @@ HBlink4 is designed to be modular, allowing you to access repeater metadata, con
 The main protocol handler class that manages repeater connections and DMR traffic.
 
 ```python
-from hblink4.hblink import HBProtocol
+from nexus.hblink import HBProtocol
 from twisted.internet import reactor
 
 protocol = HBProtocol()
@@ -68,7 +68,7 @@ import json
 import signal
 from pathlib import Path
 from twisted.internet import reactor
-from hblink4.hblink import HBProtocol, CONFIG
+from nexus.hblink import HBProtocol, CONFIG
 
 class MyDMRApplication:
     def __init__(self, config_file: str):
@@ -148,7 +148,7 @@ if __name__ == '__main__':
 
 ```python
 from twisted.internet import reactor
-from hblink4.hblink import HBProtocol, CONFIG
+from nexus.hblink import HBProtocol, CONFIG
 
 class MyDMRApplication:
     def __init__(self):

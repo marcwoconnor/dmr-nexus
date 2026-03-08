@@ -7,7 +7,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hblink4.hblink import StreamState, RepeaterState
+from nexus.hblink import StreamState, RepeaterState
 from time import time, sleep
 
 def test_stream_state():

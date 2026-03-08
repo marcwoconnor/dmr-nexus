@@ -10,13 +10,13 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from hblink4.backbone import (
+from nexus.backbone import (
     BackboneBus, BackbonePeerState, TalkgroupRoutingTable,
     RegionalTGSummary, BB_AUTH_CHALLENGE, BB_AUTH_RESPONSE,
     BB_AUTH_OK, BB_AUTH_FAIL, FRAME_HEADER, MSG_TYPE_JSON,
     UserLookupService, CrossRegionUserEntry,
 )
-from hblink4.user_cache import UserCache
+from nexus.user_cache import UserCache
 
 
 # ========== TG Routing Table Tests ==========

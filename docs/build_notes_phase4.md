@@ -26,7 +26,7 @@ This means you can add a repeater to the blacklist, SIGHUP, and it's immediately
 vim config/config.json
 
 # Reload without restart
-kill -HUP $(pidof python3)  # or: kill -HUP $(cat /var/run/hblink4.pid)
+kill -HUP $(pidof python3)  # or: kill -HUP $(cat /var/run/nexus.pid)
 
 # Verify via management socket
 python3 hbctl.py status
@@ -59,7 +59,7 @@ For multi-server clusters: edit config on all servers, then SIGHUP each one. Con
 `hbctl.py` — simple Python CLI that connects to the management socket and pretty-prints responses. No dependencies beyond stdlib.
 
 ### Code Changes
-- `async_main()`: Unix socket server at `/tmp/hblink4_mgmt.sock` (configurable via `global.management_socket`)
+- `async_main()`: Unix socket server at `/tmp/nexus_mgmt.sock` (configurable via `global.management_socket`)
 - `handle_mgmt_client()`: async connection handler, line-delimited JSON
 - `_handle_mgmt_command()`: command dispatcher
 - `hbctl.py`: CLI client

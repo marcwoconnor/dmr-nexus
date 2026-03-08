@@ -11,8 +11,8 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hblink4.hblink import StreamState, RepeaterState, HBProtocol
-from hblink4.access_control import RepeaterMatcher, RepeaterConfig
+from nexus.hblink import StreamState, RepeaterState, HBProtocol
+from nexus.access_control import RepeaterMatcher, RepeaterConfig
 from time import time
 import json
 

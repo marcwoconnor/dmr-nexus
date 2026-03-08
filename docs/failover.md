@@ -87,28 +87,36 @@ The exact configuration depends on the firmware. Check your repeater's documenta
 
 ---
 
-## Option 3: Graceful Redirect (Future — Requires Firmware Support)
+## Option 3: Server-Pushed Topology (Implemented — Phase 7.1)
 
-**Planned for Phase 5.3. Not yet implemented.**
+**Implemented. Works with topology-aware clients (test_repeater.py, CLNT native protocol). Legacy repeaters fall back to Options 1/2.**
 
-When a server shuts down gracefully (maintenance, rolling upgrade), it could send a `MSTRDR` (Master Redirect) message to connected repeaters containing the address of a healthy peer. The repeater would immediately reconnect there instead of waiting for ping timeout.
+The server pushes its full cluster topology (`RPTTOPO` message) to connected repeaters on registration and on every cluster state change. Repeaters cache this and use it for instant failover, proactive drain switching, and automatic load rebalancing.
 
-### Proposed Flow
+### How It Works
 
-1. Admin initiates graceful shutdown on server-a.
-2. Server-a broadcasts `node_draining` to cluster peers.
-3. Server-a sends `MSTRDR` + `<server-b address>` to each connected repeater.
-4. Repeaters immediately reconnect to server-b.
-5. Failover completes in ~1-2 seconds instead of ~15 seconds.
+1. Repeater connects and completes auth handshake.
+2. Server sends `RPTTOPO` with all cluster servers, their health, load, and priority.
+3. Repeater caches the server list locally.
+4. On server failure (3 missed pongs, ~25s): repeater picks next-best server from cache, reconnects in ~1-2s.
+5. On graceful drain: server pushes topology with `draining=true`, repeater switches immediately (~2-3s).
+6. On server recovery: topology push triggers load-based rebalancing with anti-flap protection (~35-45s).
 
-### Requirements
+### Advantages Over DNS/Config
 
-- Repeater firmware must understand the `MSTRDR` message (new HomeBrew extension).
-- Until firmware support exists, the graceful shutdown falls back to `MSTCL` (disconnect), which triggers the repeater's normal reconnection logic via DNS or config fallback.
+- **Instant failover target**: No DNS re-resolve or static fallback list — the server told the repeater exactly where to go.
+- **Load-aware**: Repeaters switch to the least-loaded server, not a random DNS record.
+- **Proactive drain**: Repeaters switch before the server shuts down, not after.
+- **Automatic rebalancing**: After a failure+recovery, repeaters redistribute across the cluster.
+- **Zero external infrastructure**: No health-checked DNS, no load balancer, no static configs.
 
-### Current Graceful Shutdown Behavior
+### Limitations
 
-Today, `graceful_shutdown()` sends `MSTCL` to all repeaters after draining active streams. This is a clean disconnect signal that triggers the repeater's built-in reconnection. Combined with DNS failover, this gives ~15-20 second failover. The `MSTRDR` extension would reduce this to ~1-2 seconds but requires ecosystem adoption.
+- Only works with topology-aware clients (our sim tool, CLNT native protocol).
+- Legacy HomeBrew repeaters (MMDVM, Pi-Star) silently ignore `RPTTOPO` and need Options 1/2.
+- Rebalance convergence takes ~35-45s (by design — anti-flap protection).
+
+See `cluster_topology_protocol.md` for full protocol details, wire format, anti-flap algorithm, and priority calculation.
 
 ---
 
@@ -140,10 +148,11 @@ The config hash drift detection in heartbeats will warn if servers have differen
 
 ### Rolling Upgrade Procedure
 
-1. Drain server-a: `kill -TERM <pid>` (triggers graceful shutdown)
-2. Server-a broadcasts `node_draining`, waits for streams, sends `MSTCL` to repeaters
-3. Repeaters reconnect to server-b via DNS
+1. Drain server-a: `systemctl stop dmr-nexus` (triggers graceful shutdown)
+2. Server-a sets `draining=true`, pushes topology → topology-aware repeaters switch proactively (~2-3s)
+3. Server-a broadcasts `node_draining`, waits for streams, sends `MSTCL` → legacy repeaters reconnect via DNS (~15-20s)
 4. Upgrade server-a software
 5. Start server-a, cluster bus reconnects, state syncs
-6. Repeaters naturally balance back to server-a on next reconnect cycle (or stay on server-b — both are fine)
-7. Repeat for server-b if needed
+6. Server-b pushes updated topology showing server-a alive with load=0
+7. Topology-aware repeaters rebalance back to server-a (~35-45s, anti-flap protected)
+8. Repeat for server-b if needed

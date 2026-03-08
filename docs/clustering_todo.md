@@ -6,20 +6,29 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ## Recommended Implementation Order
 
-| Order | Phase | What You Get |
-|-------|-------|-------------|
-| 1 | 1.1 + 1.2 | Cluster bus running, servers see each other's repeaters |
-| 2 | 2.1 - 2.4 | Cross-server stream routing (core value) |
-| 3 | 3.2 + 3.3 | Failure detection + graceful shutdown |
-| 4 | 1.3 | User cache sharing (private calls across servers) |
-| 5 | 3.1 | DNS/config failover documentation (free) |
-| 6 | 1.4 + 4.2 | Dashboard shows cluster state |
-| 7 | 4.1 + 4.3 | Config hot-reload + management commands |
-| 8 | 5.1 + 5.2 | Token auth + subscriptions |
-| 9 | 5.4 | HomeBrew proxy adapter (unified routing path) |
-| 10 | 5.3 | Cluster-aware keepalive (fast failover) |
-| 11 | 5.5 | Multi-connect (defer until needed) |
-| 12 | 6.1 - 6.6 | Global scale (defer until >10 nodes) |
+| Order | Phase | What You Get | Status |
+|-------|-------|-------------|--------|
+| 1 | 1.1 + 1.2 | Cluster bus running, servers see each other's repeaters | DONE |
+| 2 | 2.1 - 2.4 | Cross-server stream routing (core value) | DONE |
+| 3 | 3.2 + 3.3 | Failure detection + graceful shutdown | DONE |
+| 4 | 1.3 | User cache sharing (private calls across servers) | DONE |
+| 5 | 3.1 | DNS/config failover documentation (free) | DONE |
+| 6 | 1.4 + 4.2 | Dashboard shows cluster state | DONE |
+| 7 | 4.1 + 4.3 | Config hot-reload + management commands | DONE |
+| 8 | 5.1 + 5.2 | Token auth + subscriptions | DONE |
+| 9 | 5.4 | HomeBrew proxy adapter (unified routing path) | DONE |
+| 10 | 5.3 | Cluster-aware keepalive (fast failover) | DONE |
+| 11 | 5.5 | Multi-connect (defer until needed) | DONE |
+| 12 | 6.1 - 6.5 | Global scale backbone, TG routing, user lookup, failover | DONE |
+| 13 | 6.6 | Backbone hardening (TLS, key rotation, priority queues) | TODO |
+| **14** | **7.1** | **Cluster topology protocol — server-pushed failover for repeaters/clients** | **NEXT** |
+
+## Next Up
+
+| Priority | Task | Description |
+|----------|------|-------------|
+| **1** | Phase 7.1: Cluster topology protocol | Server-pushed topology to repeaters (`RPTCL`) and clients (`CLNT_TOPO`) for instant failover. Live updates on cluster change. Forced re-registration. See `docs/cluster_topology_protocol.md`. |
+| 2 | 6.6 Backbone hardening | Separate secrets, key rotation, TLS, priority queues |
 
 ---
 
@@ -29,8 +38,8 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 1.1 Cluster Bus (LOW RISK)
 
-**New file:** `hblink4/cluster.py` (~400 lines)
-**Modified:** `hblink4/hblink.py` (init, cleanup), `hblink4/config.py` (schema)
+**New file:** `nexus/cluster.py` (~400 lines)
+**Modified:** `nexus/hblink.py` (init, cleanup), `nexus/config.py` (schema)
 
 - [ ] Create `ClusterBus` class with TCP full-mesh peer management
 - [ ] Implement length-prefixed JSON framing (reuse `EventEmitter` pattern from `events.py`)
@@ -55,7 +64,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 1.2 State Advertisement (LOW RISK)
 
-**Modified:** `hblink4/hblink.py`, `hblink4/models.py`
+**Modified:** `nexus/hblink.py`, `nexus/models.py`
 
 - [ ] Create `RemoteRepeaterInfo` dataclass in `models.py`
 - [ ] On repeater auth complete (`_handle_rptk`), broadcast `repeater_up`:
@@ -70,7 +79,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 1.3 User Cache Sharing (LOW RISK)
 
-**Modified:** `hblink4/user_cache.py`, `hblink4/hblink.py`
+**Modified:** `nexus/user_cache.py`, `nexus/hblink.py`
 
 - [ ] Add `source_node` field to `UserCache` entries
 - [ ] On `UserCache.update()`, queue cluster broadcast of `user_heard` event
@@ -81,7 +90,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 1.4 Dashboard Cluster View (LOW RISK)
 
-**Modified:** `hblink4/events.py`, `dashboard/server.py`
+**Modified:** `nexus/events.py`, `dashboard/server.py`
 
 - [ ] Add `cluster_state` event type in `EventEmitter`
 - [ ] Send cluster state updates to dashboard on peer connect/disconnect/heartbeat
@@ -97,7 +106,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 2.1 Cross-Server Target Calculation (MEDIUM RISK)
 
-**Modified:** `hblink4/hblink.py` (`_calculate_stream_targets`)
+**Modified:** `nexus/hblink.py` (`_calculate_stream_targets`)
 
 - [ ] Extend `_calculate_stream_targets()` with cluster state loop:
   - After local repeater loop and outbound loop
@@ -109,7 +118,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 2.2 Cluster Stream Protocol (MEDIUM RISK)
 
-**Modified:** `hblink4/cluster.py`
+**Modified:** `nexus/cluster.py`
 
 - [ ] Define wire formats:
   - `stream_start`: JSON envelope with `stream_id`, `slot`, `dst_id`, `rf_src`, `call_type`, `source_node`, `source_repeater`
@@ -120,7 +129,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 2.3 Virtual Stream Reception (MEDIUM RISK)
 
-**Modified:** `hblink4/hblink.py`
+**Modified:** `nexus/hblink.py`
 
 - [ ] Handle incoming `stream_start`: create virtual `StreamState` with `source_node` field
 - [ ] Run `_calculate_stream_targets()` for virtual streams against LOCAL repeaters only
@@ -131,7 +140,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 2.4 Stream Lifecycle Integration (LOW RISK)
 
-**Modified:** `hblink4/hblink.py` (`_forward_stream`)
+**Modified:** `nexus/hblink.py` (`_forward_stream`)
 
 - [ ] In `_forward_stream()`: detect `('cluster', node_id)` targets, send via cluster bus
 - [ ] On stream start: emit `stream_start` to relevant peers
@@ -154,7 +163,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 3.2 Peer Failure Detection (LOW RISK)
 
-**Modified:** `hblink4/cluster.py`, `hblink4/hblink.py`
+**Modified:** `nexus/cluster.py`, `nexus/hblink.py`
 
 - [ ] On peer declared dead:
   - Terminate all virtual streams sourced from that peer
@@ -164,7 +173,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 3.3 Graceful Shutdown (MEDIUM RISK)
 
-**Modified:** `hblink4/hblink.py`
+**Modified:** `nexus/hblink.py`
 
 - [ ] Handle `SIGTERM` with ordered shutdown:
   1. Stop accepting new repeater logins (reject `RPTL`)
@@ -190,7 +199,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 4.1 Config Hot-Reload (MEDIUM RISK)
 
-**Modified:** `hblink4/hblink.py`, `hblink4/config.py`, `hblink4/access_control.py`
+**Modified:** `nexus/hblink.py`, `nexus/config.py`, `nexus/access_control.py`
 
 - [ ] Add `SIGHUP` handler to `hblink.py`
 - [ ] Reload `repeater_configurations`, `blacklist`, `connection_type_detection` from config file
@@ -224,8 +233,8 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 5.1 Token Auth and Validation (MEDIUM RISK)
 
-**New file:** `hblink4/cluster_protocol.py` (~300 lines)
-**Modified:** `hblink4/hblink.py` (dual protocol dispatch)
+**New file:** `nexus/cluster_protocol.py` (~300 lines)
+**Modified:** `nexus/hblink.py` (dual protocol dispatch)
 
 - [ ] Token structure: `{repeater_id, allowed_tg_slot1, allowed_tg_slot2, issued_at, expires_at, cluster_id}`
 - [ ] HMAC-SHA256 signing with cluster-wide `shared_secret`
@@ -237,8 +246,8 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 5.2 Subscription Store (MEDIUM RISK)
 
-**New file:** `hblink4/subscriptions.py` (~200 lines)
-**Modified:** `hblink4/hblink.py`, `hblink4/cluster.py` (replication)
+**New file:** `nexus/subscriptions.py` (~200 lines)
+**Modified:** `nexus/hblink.py`, `nexus/cluster.py` (replication)
 
 - [ ] `SubscriptionStore` class with `subscribe()`, `get_subscribers()`, `replicate_to()`
 - [ ] Client sends `SUBSCRIBE` with per-slot talkgroup lists
@@ -248,7 +257,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 5.3 Cluster-Aware Keepalive (LOW RISK)
 
-**Modified:** `hblink4/cluster_protocol.py`
+**Modified:** `nexus/cluster_protocol.py`
 
 - [ ] `PONG` response includes:
   - `cluster_health[]`: node_id, status, load per peer
@@ -259,7 +268,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 5.4 HomeBrew Proxy Adapter (MEDIUM RISK)
 
-**Modified:** `hblink4/hblink.py`
+**Modified:** `nexus/hblink.py`
 
 - [ ] HomeBrew handler becomes thin translation layer:
   1. Perform traditional challenge-response auth
@@ -271,7 +280,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 5.5 Multi-Connect Support (HIGH RISK -- DEFER)
 
-**Modified:** Client-side only; `hblink4/hblink.py` (server-side dedup)
+**Modified:** Client-side only; `nexus/hblink.py` (server-side dedup)
 
 - [ ] Client connects to two servers simultaneously (primary for TX, both for RX)
 - [ ] Client-side stream dedup by `stream_id`
@@ -287,8 +296,8 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 6.1 Region Config and Backbone Bus (MEDIUM RISK)
 
-**New file:** `hblink4/backbone.py` (~300 lines)
-**Modified:** `hblink4/config.py`
+**New file:** `nexus/backbone.py` (~300 lines)
+**Modified:** `nexus/config.py`
 
 - [ ] Add `region` and `role` fields to cluster config
 - [ ] `BackboneBus` class: TCP connections to gateways in other regions only
@@ -298,7 +307,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 6.2 Talkgroup Routing Table (MEDIUM RISK)
 
-**Modified:** `hblink4/backbone.py`
+**Modified:** `nexus/backbone.py`
 
 - [ ] `TalkgroupRoutingTable` with `RegionalTGSummary` dataclass
 - [ ] Gateway computes regional TG union from all local + intra-region repeaters
@@ -309,7 +318,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 6.3 Hierarchical Stream Forwarding (MEDIUM RISK)
 
-**Modified:** `hblink4/hblink.py` (`_calculate_stream_targets`, `_forward_stream`)
+**Modified:** `nexus/hblink.py` (`_calculate_stream_targets`, `_forward_stream`)
 
 - [ ] Third loop in `_calculate_stream_targets()`: check TG routing table, add `('backbone', region_id)` targets
 - [ ] Non-gateway servers route backbone targets through local gateway
@@ -318,7 +327,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 6.4 Cross-Region User Lookup (LOW RISK)
 
-**Modified:** `hblink4/backbone.py`, `hblink4/user_cache.py`
+**Modified:** `nexus/backbone.py`, `nexus/user_cache.py`
 
 - [ ] Pull model: query fans out through gateways only on local/regional cache miss
 - [ ] `UserLookupService`: `query()`, `respond()`, `cache_result()`
@@ -328,7 +337,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 6.5 Gateway Failover (MEDIUM RISK)
 
-**Modified:** `hblink4/backbone.py`, `hblink4/cluster.py`
+**Modified:** `nexus/backbone.py`, `nexus/cluster.py`
 
 - [ ] Dual gateway per region (primary + hot standby)
 - [ ] Intra-region heartbeat detects primary gateway death
@@ -337,7 +346,7 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 ### 6.6 Backbone Hardening (LOW RISK)
 
-**Modified:** `hblink4/backbone.py`, config changes
+**Modified:** `nexus/backbone.py`, config changes
 
 - [ ] Separate secrets per trust boundary (regional vs. backbone)
 - [ ] Key rotation procedure with grace period (dual-key acceptance)
@@ -354,22 +363,22 @@ A detailed, ordered checklist for implementing clustering, the cluster-native pr
 
 | File | Phase | Est. Lines | Purpose |
 |------|-------|-----------|---------|
-| `hblink4/cluster.py` | 1.1 | ~400 | TCP mesh cluster bus, peer management, heartbeat |
-| `hblink4/cluster_protocol.py` | 5.1 | ~300 | Cluster-native client protocol, token auth |
-| `hblink4/subscriptions.py` | 5.2 | ~200 | Client TG subscription store, replication |
-| `hblink4/backbone.py` | 6.1 | ~500 | Backbone bus, TG routing table, user lookup |
+| `nexus/cluster.py` | 1.1 | ~400 | TCP mesh cluster bus, peer management, heartbeat |
+| `nexus/cluster_protocol.py` | 5.1 | ~300 | Cluster-native client protocol, token auth |
+| `nexus/subscriptions.py` | 5.2 | ~200 | Client TG subscription store, replication |
+| `nexus/backbone.py` | 6.1 | ~500 | Backbone bus, TG routing table, user lookup |
 | **Total** | | **~1,400** | |
 
 ## Key Modified Files
 
 | File | Phases | Nature of Changes |
 |------|--------|------------------|
-| `hblink4/hblink.py` | Nearly all | Central hub: cluster init, target calc, virtual streams, shutdown, dual protocol |
-| `hblink4/models.py` | 1.2 | Add `RemoteRepeaterInfo` dataclass |
-| `hblink4/user_cache.py` | 1.3, 6.4 | `source_node` field, cross-region lookup |
-| `hblink4/config.py` | 1.1, 6.1 | Cluster and backbone config schema |
-| `hblink4/access_control.py` | 4.1 | Runtime replacement support for hot-reload |
-| `hblink4/events.py` | 1.4 | Cluster state event type |
+| `nexus/hblink.py` | Nearly all | Central hub: cluster init, target calc, virtual streams, shutdown, dual protocol |
+| `nexus/models.py` | 1.2 | Add `RemoteRepeaterInfo` dataclass |
+| `nexus/user_cache.py` | 1.3, 6.4 | `source_node` field, cross-region lookup |
+| `nexus/config.py` | 1.1, 6.1 | Cluster and backbone config schema |
+| `nexus/access_control.py` | 4.1 | Runtime replacement support for hot-reload |
+| `nexus/events.py` | 1.4 | Cluster state event type |
 | `dashboard/server.py` | 1.4, 4.2 | Cluster panel, unified last heard, latency display |
 
 ---

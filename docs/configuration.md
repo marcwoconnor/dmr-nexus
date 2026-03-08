@@ -113,7 +113,7 @@ The `dashboard` section is a **top-level** configuration (not nested under `glob
         "host_ipv4": "127.0.0.1",
         "host_ipv6": "::1",
         "port": 8765,
-        "unix_socket": "/tmp/hblink4.sock",
+        "unix_socket": "/tmp/nexus.sock",
         "buffer_size": 65536
     }
 }
@@ -127,7 +127,7 @@ The `dashboard` section is a **top-level** configuration (not nested under `glob
 | `host_ipv4` | string | IPv4 address for TCP transport (e.g., "127.0.0.1") |
 | `host_ipv6` | string | IPv6 address for TCP transport (e.g., "::1") |
 | `port` | number | Port number for TCP transport (default: 8765) |
-| `unix_socket` | string | Unix socket path for Unix transport (default: "/tmp/hblink4.sock") |
+| `unix_socket` | string | Unix socket path for Unix transport (default: "/tmp/nexus.sock") |
 | `buffer_size` | number | Socket send buffer size (default: 65536) |
 
 ### Transport Options
@@ -183,7 +183,7 @@ When using TCP transport with HBlink4 and dashboard on **different machines**, y
 "dashboard": {
     "enabled": true,
     "transport": "unix",
-    "unix_socket": "/tmp/hblink4.sock"
+    "unix_socket": "/tmp/nexus.sock"
 }
 ```
 

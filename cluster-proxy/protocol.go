@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Cluster-native protocol constants — matches hblink4/cluster_protocol.py
+// Cluster-native protocol constants — matches nexus/cluster_protocol.py
 var (
 	// 4-byte magic prefix distinguishes native from HomeBrew
 	NativeMagic = []byte("CLNT")

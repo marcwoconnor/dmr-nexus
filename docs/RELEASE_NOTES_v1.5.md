@@ -52,7 +52,7 @@ This release implements a comprehensive detailed repeater information feature wi
 
 ### Backend Changes
 
-#### `hblink4/access_control.py`
+#### `nexus/access_control.py`
 ```python
 def get_pattern_for_repeater(self, radio_id: int, callsign: Optional[str] = None) -> Optional[PatternMatch]:
     """Return the pattern that matched this repeater, or None if using default"""
@@ -60,7 +60,7 @@ def get_pattern_for_repeater(self, radio_id: int, callsign: Optional[str] = None
 - New method to retrieve the matched pattern object
 - Used by HBlink to determine match reason for dashboard display
 
-#### `hblink4/hblink.py`
+#### `nexus/hblink.py`
 ```python
 def _emit_repeater_details(self, repeater_id: bytes, repeater: RepeaterState) -> None:
     """Emit detailed repeater information (sent once on connection)"""
@@ -222,10 +222,10 @@ No configuration changes required. Feature works automatically with existing con
 ### Rollback Procedure
 If issues arise:
 ```bash
-cd /home/cort/hblink4
+cd /home/cort/nexus
 git checkout v1.4
-systemctl restart hblink4
-systemctl restart hblink4-dash
+systemctl restart nexus
+systemctl restart nexus-dash
 ```
 
 ## Credits

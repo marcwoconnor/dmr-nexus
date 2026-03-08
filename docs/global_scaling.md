@@ -220,7 +220,7 @@ The gateway's fan-out to other regions is bounded by the number of regions, not 
 
 **Phase 2 (Cross-Server Routing):** `_calculate_stream_targets()` gains a third loop after local repeaters and intra-region peers: check the talkgroup routing table for matching regions and add `('backbone', region_id)` targets. The `_forward_stream()` method routes backbone targets through the local gateway.
 
-**New: `hblink4/backbone.py`** (~500 lines):
+**New: `nexus/backbone.py`** (~500 lines):
 - `BackboneBus`: Manages TCP connections to gateways in other regions
 - `TalkgroupRoutingTable`: Maintains and queries the per-region TG summaries
 - `UserLookupService`: Handles cross-region private call user lookups

@@ -54,6 +54,11 @@
     "backbone": {
         "enabled": false
     },
+    "tg_plan": {
+        "enabled": true,
+        "database_url": "postgresql://nexus:3MweroZsCmAyYu5kyGocr4I755J2-LfO@10.31.11.49:5432/nexus",
+        "admin_token": "S9hSkqFagmZriCB3OQiJy64zDRVs8v-W5hF8ZRmtklw"
+    },
     "dashboard": {
         "enabled": true,
         "transport": "tcp",

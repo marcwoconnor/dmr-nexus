@@ -42,16 +42,16 @@ The original HBlink was a single-server design: one process, one set of repeater
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `hblink4/hblink.py` | ~4,100 | Central hub — UDP protocol, stream routing, cluster/backbone integration, native protocol, management interface |
-| `hblink4/backbone.py` | ~900 | Inter-region backbone bus, TG routing table, cross-region user lookup service |
-| `hblink4/cluster.py` | ~640 | Intra-region TCP mesh cluster bus, peer management, heartbeats, HMAC auth |
-| `hblink4/events.py` | ~340 | Event emitter to dashboard (length-prefixed JSON over TCP/Unix socket) |
-| `hblink4/user_cache.py` | ~290 | Radio ID tracking for private call routing and dashboard "Last Heard" |
-| `hblink4/models.py` | ~280 | Dataclasses: RepeaterState, OutboundState, StreamState |
-| `hblink4/access_control.py` | ~220 | Pattern-based repeater matching, blacklisting, per-repeater config |
-| `hblink4/cluster_protocol.py` | ~200 | Cluster-native client protocol, stateless HMAC token auth |
-| `hblink4/protocol.py` | ~190 | DMR packet parsing, terminator detection (hot path) |
-| `hblink4/subscriptions.py` | ~170 | Client TG subscription store with config validation |
+| `nexus/hblink.py` | ~4,100 | Central hub — UDP protocol, stream routing, cluster/backbone integration, native protocol, management interface |
+| `nexus/backbone.py` | ~900 | Inter-region backbone bus, TG routing table, cross-region user lookup service |
+| `nexus/cluster.py` | ~640 | Intra-region TCP mesh cluster bus, peer management, heartbeats, HMAC auth |
+| `nexus/events.py` | ~340 | Event emitter to dashboard (length-prefixed JSON over TCP/Unix socket) |
+| `nexus/user_cache.py` | ~290 | Radio ID tracking for private call routing and dashboard "Last Heard" |
+| `nexus/models.py` | ~280 | Dataclasses: RepeaterState, OutboundState, StreamState |
+| `nexus/access_control.py` | ~220 | Pattern-based repeater matching, blacklisting, per-repeater config |
+| `nexus/cluster_protocol.py` | ~200 | Cluster-native client protocol, stateless HMAC token auth |
+| `nexus/protocol.py` | ~190 | DMR packet parsing, terminator detection (hot path) |
+| `nexus/subscriptions.py` | ~170 | Client TG subscription store with config validation |
 
 ### Dashboard
 
@@ -108,7 +108,7 @@ See `config/config_sample.json` for a complete example with all sections documen
 - **[Configuration Guide](docs/configuration.md)** — Complete config reference
 - **[Dashboard README](dashboard/README.md)** — Dashboard features
 - **[Systemd Deployment](SYSTEMD.md)** — Production setup
-- **[Connecting Repeaters](docs/connecting_to_hblink4.md)** — Repeater configuration
+- **[Connecting Repeaters](docs/connecting_to_nexus.md)** — Repeater configuration
 - **[Clustering Architecture](docs/clustering_plan.md)** — Multi-server design
 - **[Native Protocol Spec](docs/cluster_native_protocol.md)** — Cluster-native client protocol
 - **[Global Scaling](docs/global_scaling.md)** — Hierarchical routing design

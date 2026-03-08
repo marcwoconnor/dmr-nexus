@@ -14,7 +14,7 @@ HBlink4 runs as **two separate processes** that talk to each other:
 
 2. **The Dashboard** (`python3 run_dashboard.py`) — This is a web server (FastAPI + Uvicorn) that shows you what's happening in real time in a browser. It receives events from the core server and pushes them to your browser via WebSocket.
 
-They communicate through a **Unix socket** (`/tmp/hblink4.sock`) by default, or optionally TCP. The core server sends events *to* the dashboard (like "a new transmission started"), and the dashboard can send a `sync_request` back (like "I just restarted, send me the current state").
+They communicate through a **Unix socket** (`/tmp/nexus.sock`) by default, or optionally TCP. The core server sends events *to* the dashboard (like "a new transmission started"), and the dashboard can send a `sync_request` back (like "I just restarted, send me the current state").
 
 ```
 Repeaters <-> [Core Server :62031/UDP] <-> [Unix Socket] <-> [Dashboard :8080/HTTP+WS] <-> Browser
@@ -22,7 +22,7 @@ Repeaters <-> [Core Server :62031/UDP] <-> [Unix Socket] <-> [Dashboard :8080/HT
 
 ## The Core Server Module by Module
 
-Each file in `hblink4/` in the order you'd encounter them if you followed a packet through the system.
+Each file in `nexus/` in the order you'd encounter them if you followed a packet through the system.
 
 ### `constants.py` — The Protocol Vocabulary
 
@@ -157,7 +157,7 @@ python3 run_dashboard.py
 ```
 
 **Running in production:**
-The repo includes systemd service files (`hblink4.service`, `hblink4-dash.service`) — see `SYSTEMD.md` for installation. Important: the services run as the user who owns the installation directory.
+The repo includes systemd service files (`nexus.service`, `nexus-dash.service`) — see `SYSTEMD.md` for installation. Important: the services run as the user who owns the installation directory.
 
 **Running tests:**
 ```bash

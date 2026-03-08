@@ -4,16 +4,16 @@
 
 HBlink4 is a DMR Server implementing the HomeBrew protocol for amateur radio repeater networks. It's a **repeater-centric** architecture focusing on per-repeater control rather than server-level groupings. The system consists of two main components:
 
-- **Core server** (`hblink4/`): Asyncio-based UDP server handling DMR protocol, stream tracking, and access control
+- **Core server** (`nexus/`): Asyncio-based UDP server handling DMR protocol, stream tracking, and access control
 - **Web dashboard** (`dashboard/`): FastAPI-based real-time monitoring with WebSocket updates
 
 ## Architecture Patterns
 
 ### Component Structure
-- `hblink4/hblink.py`: Main server with asyncio UDP protocol handlers
-- `hblink4/events.py`: Event emission to dashboard (TCP/Unix socket transport abstraction)
-- `hblink4/access_control.py`: Pattern-based repeater matching and blacklisting
-- `hblink4/models.py`: Dataclasses for `RepeaterState`, `StreamState`, `OutboundConnectionConfig`
+- `nexus/hblink.py`: Main server with asyncio UDP protocol handlers
+- `nexus/events.py`: Event emission to dashboard (TCP/Unix socket transport abstraction)
+- `nexus/access_control.py`: Pattern-based repeater matching and blacklisting
+- `nexus/models.py`: Dataclasses for `RepeaterState`, `StreamState`, `OutboundConnectionConfig`
 - `dashboard/server.py`: FastAPI app with WebSocket real-time updates
 
 ### Configuration Pattern
@@ -67,7 +67,7 @@ python -m pytest tests/test_access_control.py::TestRepeaterMatcher::test_specifi
 
 ### Transport Configuration
 Dashboard communication uses transport abstraction:
-- **Unix socket** (default): `/tmp/hblink4.sock` - fastest for localhost
+- **Unix socket** (default): `/tmp/nexus.sock` - fastest for localhost
 - **TCP**: IPv4/IPv6 dual-stack - for remote dashboard
 
 Both `config/config.json` and `dashboard/config.json` must use matching transport settings.
@@ -102,7 +102,7 @@ target_repeater = user_cache.lookup_user(target_id)
 
 ## File Organization
 
-- **Core logic**: `hblink4/` package with protocol handling
+- **Core logic**: `nexus/` package with protocol handling
 - **Configuration**: `config/config.json` (server), `dashboard/config.json` (web)
 - **Scripts**: `run.py`, `run_dashboard.py`, `run_all.sh`
 - **Deployment**: Systemd services expect user ownership, virtual environment

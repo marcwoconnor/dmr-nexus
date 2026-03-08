@@ -37,7 +37,7 @@ import sys
 try:
     from .constants import (
         RPTA, RPTL, RPTK, RPTC, RPTCL, MSTCL, DMRD,
-        MSTNAK, MSTPONG, RPTPING, RPTACK, RPTP, RPTO, DMRA
+        MSTNAK, MSTPONG, RPTPING, RPTACK, RPTP, RPTO, DMRA, RPTTOPO
     )
     from .access_control import RepeaterMatcher
     from .events import EventEmitter
@@ -45,6 +45,8 @@ try:
     from .cluster import ClusterBus
     from .cluster_protocol import NATIVE_MAGIC, TokenManager, Token, CMD_AUTH, CMD_SUBSCRIBE, CMD_PING, CMD_DATA, CMD_DISCONNECT, CMD_AUTH_ACK, CMD_AUTH_NAK, CMD_SUB_ACK, CMD_PONG
     from .subscriptions import SubscriptionStore
+    from .topology import TopologyManager, CMD_TOPO
+    from .tg_plan import TGPlanStore
     from .utils import (
         safe_decode_bytes, normalize_addr, rid_to_int, bytes_to_int,
         cleanup_old_logs, setup_logging, PeerAddress, detect_connection_type
@@ -61,7 +63,7 @@ except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from constants import (
         RPTA, RPTL, RPTK, RPTC, RPTCL, MSTCL, DMRD,
-        MSTNAK, MSTPONG, RPTPING, RPTACK, RPTP, RPTO, DMRA
+        MSTNAK, MSTPONG, RPTPING, RPTACK, RPTP, RPTO, DMRA, RPTTOPO
     )
     from access_control import RepeaterMatcher
     from events import EventEmitter
@@ -69,6 +71,8 @@ except ImportError:
     from cluster import ClusterBus
     from cluster_protocol import NATIVE_MAGIC, TokenManager, Token, CMD_AUTH, CMD_SUBSCRIBE, CMD_PING, CMD_DATA, CMD_DISCONNECT, CMD_AUTH_ACK, CMD_AUTH_NAK, CMD_SUB_ACK, CMD_PONG
     from subscriptions import SubscriptionStore
+    from topology import TopologyManager, CMD_TOPO
+    from tg_plan import TGPlanStore
     from utils import (
         safe_decode_bytes, normalize_addr, rid_to_int, bytes_to_int,
         cleanup_old_logs, setup_logging, PeerAddress, detect_connection_type
@@ -126,7 +130,7 @@ class HBProtocol(asyncio.DatagramProtocol):
             host_ipv4=dashboard_config.get('host_ipv4', '127.0.0.1'),
             host_ipv6=dashboard_config.get('host_ipv6', '::1'),
             port=dashboard_config.get('port', 8765),
-            unix_socket=dashboard_config.get('unix_socket', '/tmp/hblink4.sock'),
+            unix_socket=dashboard_config.get('unix_socket', '/tmp/nexus.sock'),
             disable_ipv6=dashboard_config.get('disable_ipv6', False),
             buffer_size=dashboard_config.get('buffer_size', 65536)
         )
@@ -181,12 +185,25 @@ class HBProtocol(asyncio.DatagramProtocol):
         # Native client sessions: addr -> {token_hash, repeater_id, last_ping}
         self._native_clients: Dict[tuple, dict] = {}
 
+        # Topology manager (Phase 7.1) — server-pushed cluster topology for failover
+        dmr_port = CONFIG.get('global', {}).get('port_ipv4', 62031)
+        # Use cluster peer address for our advertised address, or bind address
+        dmr_address = cluster_config.get('advertise_address',
+                      CONFIG.get('global', {}).get('bind_ipv4', '0.0.0.0'))
+        self._topology_manager = TopologyManager(
+            node_id=cluster_config.get('node_id', 'standalone'),
+            dmr_address=dmr_address,
+            dmr_port=dmr_port,
+            cluster_bus=self._cluster_bus,
+            config=CONFIG,
+        )
+
         # Backbone bus for inter-region gateway routing (Phase 6)
         backbone_config = CONFIG.get('backbone', {})
         self._region_id = cluster_config.get('region', 'default')
         self._is_gateway = cluster_config.get('role', 'node') == 'gateway'
         if backbone_config.get('enabled', False) and self._is_gateway:
-            from hblink4.backbone import BackboneBus
+            from nexus.backbone import BackboneBus
             self._backbone_bus = BackboneBus(
                 node_id=cluster_config.get('node_id', 'unknown'),
                 region_id=self._region_id,
@@ -199,6 +216,17 @@ class HBProtocol(asyncio.DatagramProtocol):
 
         # Cross-region user lookup (Phase 6.4) — initialized when backbone starts
         self._user_lookup_service = None
+
+        # TG Plan — centralized talkgroup management (optional, requires PostgreSQL)
+        tg_plan_config = CONFIG.get('tg_plan', {})
+        if tg_plan_config.get('enabled', False):
+            self._tg_plan = TGPlanStore(
+                tg_plan_config['database_url'],
+                on_change=self._handle_tg_plan_change
+            )
+            LOGGER.info('TG plan configured (will connect to PG on startup)')
+        else:
+            self._tg_plan = None
     
     # ========== ADDRESS VALIDATION METHODS ==========
     
@@ -258,30 +286,53 @@ class HBProtocol(asyncio.DatagramProtocol):
             'missed_pings': repeater.missed_pings
         }
     
-    def _load_repeater_tg_config(self, repeater_id: bytes, repeater: RepeaterState) -> None:
+    def _load_repeater_tg_config(self, repeater_id: bytes, repeater: RepeaterState,
+                                  plan_tgs: dict = None) -> None:
         """
         Load and cache TG configuration for a repeater.
         Converts config lists to sets for O(1) routing lookups.
-        
-        Note: Config must exist - repeater was already authenticated with this config.
-        If this fails, it indicates a bug in authentication logic that must be fixed.
+
+        If TG plan is active and has entries for this repeater, the final TG set
+        is the intersection of config-allowed and plan-assigned TGs. Config
+        patterns remain the security boundary.
+
+        Args:
+            plan_tgs: optional pre-fetched {slot: {tg_ids}} from TG plan
         """
         repeater_config = self._matcher.get_repeater_config(
             rid_to_int(repeater_id),
             repeater.get_callsign_str()
         )
-        
+
         # Convert config to internal representation:
         # None stays None (allow all), int lists become bytes sets for hot path performance
         if repeater_config.slot1_talkgroups is not None:
-            repeater.slot1_talkgroups = {tg.to_bytes(3, 'big') for tg in repeater_config.slot1_talkgroups}
+            config_slot1 = {tg.to_bytes(3, 'big') for tg in repeater_config.slot1_talkgroups}
         else:
-            repeater.slot1_talkgroups = None
-            
+            config_slot1 = None
+
         if repeater_config.slot2_talkgroups is not None:
-            repeater.slot2_talkgroups = {tg.to_bytes(3, 'big') for tg in repeater_config.slot2_talkgroups}
+            config_slot2 = {tg.to_bytes(3, 'big') for tg in repeater_config.slot2_talkgroups}
         else:
-            repeater.slot2_talkgroups = None
+            config_slot2 = None
+
+        # Apply TG plan intersection if available
+        if plan_tgs is not None and (plan_tgs.get(1) or plan_tgs.get(2)):
+            plan_slot1 = {tg.to_bytes(3, 'big') for tg in plan_tgs.get(1, set())}
+            plan_slot2 = {tg.to_bytes(3, 'big') for tg in plan_tgs.get(2, set())}
+
+            if config_slot1 is None:
+                repeater.slot1_talkgroups = plan_slot1
+            else:
+                repeater.slot1_talkgroups = config_slot1 & plan_slot1
+
+            if config_slot2 is None:
+                repeater.slot2_talkgroups = plan_slot2
+            else:
+                repeater.slot2_talkgroups = config_slot2 & plan_slot2
+        else:
+            repeater.slot1_talkgroups = config_slot1
+            repeater.slot2_talkgroups = config_slot2
 
     # ========== OUTBOUND CONNECTION METHODS (Phase 3) ==========
     
@@ -840,6 +891,10 @@ class HBProtocol(asyncio.DatagramProtocol):
         # 1. Stop accepting new logins
         self._draining = True
 
+        # 1b. Push topology with draining flag so repeaters can proactively switch (Phase 7.1)
+        self._topology_manager.set_draining(True)
+        self._topology_manager.on_cluster_change(self._repeaters, self._native_clients)
+
         # 2. Notify cluster peers
         if self._cluster_bus:
             await self._cluster_bus.broadcast({
@@ -969,10 +1024,24 @@ class HBProtocol(asyncio.DatagramProtocol):
         )
         LOGGER.info('Periodic tasks started (repeater timeout, stream timeout, user cache cleanup)')
 
+        # Wire topology manager
+        self._topology_manager.set_send_packet(self._send_packet)
+        self._topology_manager.set_draining_peers(self._draining_peers)
+        self._topology_manager.set_load_fn(lambda: len(self._repeaters))
+        self._topology_manager.set_peer_load_fn(
+            lambda nid: len(self._cluster_state.get(nid, {}))
+        )
+
         # Start cluster bus if configured
         if self._cluster_bus:
             self._tasks.append(
                 asyncio.create_task(self._start_cluster_bus(), name='cluster_bus_start')
+            )
+
+        # Start TG plan (graceful degradation: if PG unreachable, retry in background)
+        if self._tg_plan:
+            self._tasks.append(
+                asyncio.create_task(self._start_tg_plan(), name='tg_plan_start')
             )
 
     def connection_lost(self, exc):
@@ -985,6 +1054,10 @@ class HBProtocol(asyncio.DatagramProtocol):
         # Stop cluster bus
         if self._cluster_bus:
             asyncio.ensure_future(self._cluster_bus.stop())
+
+        # Stop TG plan
+        if hasattr(self, '_tg_plan') and self._tg_plan:
+            asyncio.ensure_future(self._tg_plan.stop())
 
         # Stop event emitter
         if hasattr(self, '_events') and self._events:
@@ -1064,6 +1137,10 @@ class HBProtocol(asyncio.DatagramProtocol):
         # Send token
         self._send_packet(NATIVE_MAGIC + CMD_AUTH_ACK + token_bytes, addr)
         LOGGER.info(f'Native auth OK: repeater {rid_int} from {addr[0]}:{addr[1]}')
+
+        # Topology push (Phase 7.1): send cluster server list to native client
+        if self._cluster_bus:
+            self._topology_manager.push_to_native_client(addr)
 
     def _handle_native_subscribe(self, data: bytes, addr: tuple):
         """Handle SUBSCRIBE: client declares desired TGs."""
@@ -1288,6 +1365,9 @@ class HBProtocol(asyncio.DatagramProtocol):
 
             # Update TG lists
             self._load_repeater_tg_config(repeater_id, repeater)
+            # Async TG plan refinement
+            if self._tg_plan and self._tg_plan.connected:
+                asyncio.ensure_future(self._apply_tg_plan_on_login(repeater_id, repeater))
             updated += 1
 
         # Update cluster config hash
@@ -1311,6 +1391,76 @@ class HBProtocol(asyncio.DatagramProtocol):
         self._emit_cluster_state()
 
         return True
+
+    # ========== TG PLAN METHODS ==========
+
+    async def _start_tg_plan(self):
+        """Start TG plan with graceful degradation and background retry."""
+        retry_interval = 30
+        while True:
+            try:
+                await self._tg_plan.start()
+                LOGGER.info('TG plan: PostgreSQL connected')
+                return
+            except Exception as e:
+                LOGGER.warning(f'TG plan: PG unavailable ({e}), retrying in {retry_interval}s '
+                               '(using config TGs only)')
+                await asyncio.sleep(retry_interval)
+
+    async def _handle_tg_plan_change(self, repeater_id: int):
+        """Handle PG NOTIFY — re-load TGs for an affected connected repeater."""
+        rid_bytes = repeater_id.to_bytes(4, 'big')
+        repeater = self._repeaters.get(rid_bytes)
+        if not repeater or repeater.connection_state != 'connected':
+            return
+
+        try:
+            plan_tgs = await self._tg_plan.get_tgs(repeater_id)
+            self._load_repeater_tg_config(rid_bytes, repeater, plan_tgs=plan_tgs)
+            LOGGER.info(f'TG plan: updated TGs for repeater {repeater_id} '
+                        f'(slot1={self._format_tg_display(repeater.slot1_talkgroups)}, '
+                        f'slot2={self._format_tg_display(repeater.slot2_talkgroups)})')
+
+            # Update HomeBrew subscription if applicable
+            if hasattr(self, '_create_homebrew_subscription'):
+                self._create_homebrew_subscription(rid_bytes, repeater)
+
+            # Emit event for dashboard
+            self._events.emit('repeater_tg_updated', {
+                'repeater_id': repeater_id,
+                'slot1_talkgroups': self._format_tg_json(repeater.slot1_talkgroups),
+                'slot2_talkgroups': self._format_tg_json(repeater.slot2_talkgroups),
+                'source': 'tg_plan',
+            })
+
+            # If gateway, re-compute TG summary for backbone
+            if self._backbone_bus and hasattr(self, '_advertise_tg_summary'):
+                await self._advertise_tg_summary()
+        except Exception as e:
+            LOGGER.error(f'TG plan: failed to update repeater {repeater_id}: {e}')
+
+    async def _apply_tg_plan_on_login(self, repeater_id: bytes, repeater: RepeaterState):
+        """Query TG plan after login and refine TGs if plan entries exist."""
+        try:
+            rid_int = rid_to_int(repeater_id)
+            plan_tgs = await self._tg_plan.get_tgs(rid_int)
+            if plan_tgs.get(1) or plan_tgs.get(2):
+                self._load_repeater_tg_config(repeater_id, repeater, plan_tgs=plan_tgs)
+                LOGGER.info(f'TG plan: applied for repeater {rid_int} '
+                            f'(slot1={self._format_tg_display(repeater.slot1_talkgroups)}, '
+                            f'slot2={self._format_tg_display(repeater.slot2_talkgroups)})')
+        except Exception as e:
+            LOGGER.warning(f'TG plan: login query failed for {rid_to_int(repeater_id)}: {e}')
+
+    async def _query_tg_plan(self, repeater_id: int) -> dict:
+        """Query TG plan for a repeater, returning empty if PG is down."""
+        if not self._tg_plan or not self._tg_plan.connected:
+            return {}
+        try:
+            return await self._tg_plan.get_tgs(repeater_id)
+        except Exception as e:
+            LOGGER.warning(f'TG plan: query failed for {repeater_id}: {e}')
+            return {}
 
     # ========== CLUSTER BUS METHODS ==========
 
@@ -1350,7 +1500,7 @@ class HBProtocol(asyncio.DatagramProtocol):
             # Start backbone bus if this is a gateway (Phase 6)
             if self._backbone_bus:
                 await self._backbone_bus.start()
-                from hblink4.backbone import UserLookupService
+                from nexus.backbone import UserLookupService
                 self._user_lookup_service = UserLookupService(
                     self._backbone_bus, self._region_id
                 )
@@ -1538,6 +1688,8 @@ class HBProtocol(asyncio.DatagramProtocol):
             # Send our state to the new peer
             await self._send_cluster_state_to_peer(node_id)
             self._emit_cluster_state()
+            # Push updated topology to all connected repeaters/clients (Phase 7.1)
+            self._topology_manager.on_cluster_change(self._repeaters, self._native_clients)
 
         elif msg_type == 'peer_disconnected':
             node_id = msg['node_id']
@@ -1564,6 +1716,8 @@ class HBProtocol(asyncio.DatagramProtocol):
                 LOGGER.info(f'Purged {count} remote repeater(s) from {node_id}')
             self._subscriptions.remove_by_node(node_id)
             self._emit_cluster_state()
+            # Push updated topology to all connected repeaters/clients (Phase 7.1)
+            self._topology_manager.on_cluster_change(self._repeaters, self._native_clients)
 
         elif msg_type == 'sync_request':
             await self._send_cluster_state_to_peer(msg['node_id'])
@@ -1598,6 +1752,8 @@ class HBProtocol(asyncio.DatagramProtocol):
             self._draining_peers.add(node_id)
             LOGGER.warning(f'Cluster peer {node_id} is draining — no new streams will be routed there')
             self._emit_cluster_state()
+            # Push updated topology (peer now draining, priority changes) (Phase 7.1)
+            self._topology_manager.on_cluster_change(self._repeaters, self._native_clients)
 
         elif msg_type == 'node_down':
             node_id = msg['node_id']
@@ -3040,7 +3196,11 @@ class HBProtocol(asyncio.DatagramProtocol):
             
             # Load and cache TG sets from config for fast routing checks
             self._load_repeater_tg_config(repeater_id, repeater)
-            
+
+            # Async TG plan refinement (narrows config TGs if plan exists)
+            if self._tg_plan and self._tg_plan.connected:
+                asyncio.ensure_future(self._apply_tg_plan_on_login(repeater_id, repeater))
+
             self._send_packet(b''.join([RPTACK, repeater_id]), addr)
             LOGGER.info(f'Repeater {rid_to_int(repeater_id)} ({repeater.get_callsign_str()}) configured successfully')
             LOGGER.debug(f'Repeater state after config: id={rid_to_int(repeater_id)}, state={repeater.connection_state}, addr={repeater.sockaddr}')
@@ -3057,6 +3217,10 @@ class HBProtocol(asyncio.DatagramProtocol):
 
             # HomeBrew proxy adapter (Phase 5.4): create internal subscription
             self._create_homebrew_subscription(repeater_id, repeater)
+
+            # Topology push (Phase 7.1): send cluster server list to repeater
+            if self._cluster_bus:
+                self._topology_manager.push_to_repeater(repeater_id, addr)
 
         except Exception as e:
             LOGGER.error(f'Error parsing config: {str(e)}')
@@ -3962,7 +4126,7 @@ async def async_main():
                 LOGGER.info(f'✓ Started outbound connection task for "{config.name}"')
     
     # ===== Management Socket (Phase 4.3) =====
-    mgmt_socket_path = CONFIG.get('global', {}).get('management_socket', '/tmp/hblink4_mgmt.sock')
+    mgmt_socket_path = CONFIG.get('global', {}).get('management_socket', '/tmp/nexus_mgmt.sock')
 
     async def handle_mgmt_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle a management socket client connection."""
@@ -4076,10 +4240,133 @@ async def async_main():
                 return {'ok': False, 'error': 'region_id required'}
             return proto._backbone_bus.accept_reelection(region_id)
 
+        elif command == 'push-topology':
+            if not proto or not proto._cluster_bus:
+                return {'ok': False, 'error': 'cluster not enabled'}
+            proto._topology_manager.push_to_all(proto._repeaters, proto._native_clients)
+            return {'ok': True, 'message': 'topology pushed to all clients'}
+
+        elif command == 'streams':
+            result = []
+            if proto:
+                for rid, rpt in proto._repeaters.items():
+                    if rpt.connection_state != 'connected':
+                        continue
+                    for slot in (1, 2):
+                        stream = rpt.get_slot_stream(slot)
+                        if stream and not stream.ended:
+                            result.append({
+                                'repeater_id': rid_to_int(rid),
+                                'rf_src': bytes_to_int(stream.rf_src),
+                                'dst_id': bytes_to_int(stream.dst_id),
+                                'slot': stream.slot,
+                                'call_type': stream.call_type,
+                                'duration': round(time() - stream.start_time, 1),
+                                'packet_count': stream.packet_count,
+                                'source_node': stream.source_node,
+                            })
+            return {'ok': True, 'streams': result, 'count': len(result)}
+
+        elif command == 'outbounds':
+            result = []
+            if proto:
+                for name, ob in proto._outbounds.items():
+                    result.append({
+                        'name': name,
+                        'address': ob.config.address,
+                        'port': ob.port,
+                        'radio_id': ob.config.radio_id,
+                        'connected': ob.connected,
+                        'authenticated': ob.authenticated,
+                    })
+            return {'ok': True, 'outbounds': result, 'count': len(result)}
+
+        elif command == 'last-heard':
+            count = cmd.get('count', 20)
+            entries = []
+            if proto and proto._user_cache:
+                entries = proto._user_cache.get_last_heard(count)
+            return {'ok': True, 'last_heard': entries, 'count': len(entries)}
+
+        elif command == 'events':
+            count = cmd.get('count', 50)
+            # Events are in the dashboard, not directly accessible here
+            return {'ok': True, 'events': [], 'count': 0,
+                    'note': 'Use dashboard REST API for events'}
+
+        elif command == 'stats':
+            uc_stats = {}
+            if proto and proto._user_cache:
+                uc_stats = proto._user_cache.get_stats()
+            return {
+                'ok': True,
+                'user_cache': uc_stats,
+                'repeaters': len([r for r in proto._repeaters.values()
+                                  if r.connection_state == 'connected']) if proto else 0,
+                'outbounds': len(proto._outbounds) if proto else 0,
+            }
+
+        elif command == 'tg-routes':
+            if not proto or not proto._backbone_bus:
+                return {'ok': True, 'enabled': False, 'routes': {}}
+            routes = {}
+            if hasattr(proto._backbone_bus, '_tg_table'):
+                routes = proto._backbone_bus._tg_table.get_all_regions()
+            return {'ok': True, 'enabled': True, 'routes': routes}
+
+        elif command == 'version':
+            node_id = None
+            region = None
+            if proto and proto._cluster_bus:
+                node_id = proto._cluster_bus._node_id
+            if proto:
+                region = getattr(proto, '_region_id', None)
+            return {'ok': True, 'software': 'DMR Nexus', 'version': '2.0.0',
+                    'node_id': node_id, 'region': region}
+
+        elif command == 'running-config':
+            import copy
+            cfg = copy.deepcopy(CONFIG)
+            # Mask secrets
+            for section in ('cluster', 'backbone'):
+                if section in cfg:
+                    for key in ('shared_secret', 'backbone_secret'):
+                        if key in cfg[section]:
+                            cfg[section][key] = '********'
+            if 'tg_plan' in cfg:
+                for key in ('admin_token', 'database_url'):
+                    if key in cfg['tg_plan']:
+                        cfg['tg_plan'][key] = '********'
+            if 'repeater_configurations' in cfg:
+                for p in cfg['repeater_configurations'].get('patterns', []):
+                    if 'config' in p and 'passphrase' in p['config']:
+                        p['config']['passphrase'] = '********'
+            return {'ok': True, 'config': cfg}
+
+        elif command == 'topology':
+            if not proto or not hasattr(proto, '_topology_manager'):
+                return {'ok': False, 'error': 'topology manager not available'}
+            return proto._topology_manager.build_topology()
+
+        elif command == 'ping':
+            target = cmd.get('node_id')
+            if not proto or not proto._cluster_bus:
+                return {'ok': False, 'error': 'cluster not enabled'}
+            if not target:
+                return {'ok': False, 'error': 'node_id required'}
+            states = proto._cluster_bus.get_peer_states()
+            if target not in states:
+                return {'ok': False, 'error': f'unknown peer: {target}'}
+            ps = states[target]
+            return {'ok': True, 'node_id': target, 'alive': ps['alive'],
+                    'latency_ms': ps['latency_ms'], 'connected': ps['connected']}
+
         else:
             return {'ok': False, 'error': f'unknown command: {command}',
                     'commands': ['status', 'cluster', 'backbone', 'repeaters',
-                                 'reload', 'drain', 'accept-reelection']}
+                                 'reload', 'drain', 'push-topology', 'accept-reelection',
+                                 'streams', 'outbounds', 'last-heard', 'events', 'stats',
+                                 'tg-routes', 'version', 'running-config', 'topology', 'ping']}
 
     mgmt_server = None
     try:

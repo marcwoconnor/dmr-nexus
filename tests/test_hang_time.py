@@ -7,7 +7,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hblink4.hblink import StreamState, RepeaterState
+from nexus.hblink import StreamState, RepeaterState
 from time import time, sleep
 
 def test_hang_time():
@@ -145,7 +145,7 @@ def test_hang_time_hijacking_protection():
     repeater.set_slot_stream(1, original_stream)
     
     # Test 1: Same user can continue on same talkgroup
-    from hblink4.hblink import HBProtocol
+    from nexus.hblink import HBProtocol
     hb = HBProtocol()
     hb._repeaters[repeater.repeater_id] = repeater
     

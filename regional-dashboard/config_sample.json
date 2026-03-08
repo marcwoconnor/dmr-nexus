@@ -1,0 +1,26 @@
+{
+    "region_name": "Lab Region",
+    "dashboard_title": "DMR Nexus Regional Dashboard",
+    "listen_host": "0.0.0.0",
+    "listen_port": 8080,
+    "nodes": [
+        {
+            "node_id": "nexus-1",
+            "host": "10.31.11.40",
+            "port": 8080,
+            "latitude": 36.4435,
+            "longitude": -82.1407,
+            "location": "Boone Lake, TN"
+        },
+        {
+            "node_id": "nexus-2",
+            "host": "10.31.11.41",
+            "port": 8080,
+            "latitude": 36.5316,
+            "longitude": -82.2618,
+            "location": "Blountville, TN"
+        }
+    ],
+    "reconnect_interval": 5,
+    "max_reconnect_interval": 30
+}

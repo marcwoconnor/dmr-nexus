@@ -42,5 +42,5 @@ In `_forward_stream()`, native targets get packets reformatted:
 ## Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/hblink.py` | `_create_homebrew_subscription()`, native client loop in `_calculate_stream_targets()`, native forwarding in `_forward_stream()`, subscription cleanup in `_remove_repeater()`, subscription create calls in connection completion + RPTO handler |
+| `nexus/hblink.py` | `_create_homebrew_subscription()`, native client loop in `_calculate_stream_targets()`, native forwarding in `_forward_stream()`, subscription cleanup in `_remove_repeater()`, subscription create calls in connection completion + RPTO handler |
 | `tests/test_cluster.py` | 9 new tests, `SubscriptionStore` import, `_native_clients`+`_subscriptions` in test mock |

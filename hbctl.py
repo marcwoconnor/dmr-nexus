@@ -30,7 +30,7 @@ def send_command_data(cmd: dict, socket_path: str = SOCKET_PATH) -> dict:
 def main():
     if len(sys.argv) < 2:
         print('Usage: hbctl.py <command>')
-        print('Commands: status, cluster, backbone, repeaters, reload, drain, accept-reelection')
+        print('Commands: status, cluster, backbone, repeaters, reload, drain, push-topology, accept-reelection')
         sys.exit(1)
 
     command = sys.argv[1].lower()
@@ -98,7 +98,7 @@ def main():
             print(f"  {r['repeater_id']:>7} {r['callsign']:<10} {r['connection_type']:<10} [{r['node']}]")
         print(f"Total: {result.get('count', 0)}")
 
-    elif command in ('reload', 'drain'):
+    elif command in ('reload', 'drain', 'push-topology'):
         print(json.dumps(result, indent=2))
 
     else:

@@ -4,8 +4,8 @@ This directory contains systemd service files for running HBlink4 and its dashbo
 
 ## Service Files
 
-- `hblink4.service` - Main HBlink4 DMR server
-- `hblink4-dash.service` - Web dashboard (depends on hblink4.service)
+- `nexus.service` - Main HBlink4 DMR server
+- `nexus-dash.service` - Web dashboard (depends on nexus.service)
 
 ## Installation
 
@@ -14,8 +14,8 @@ This directory contains systemd service files for running HBlink4 and its dashbo
 Copy the service files to systemd's system directory:
 
 ```bash
-sudo cp hblink4.service /etc/systemd/system/
-sudo cp hblink4-dash.service /etc/systemd/system/
+sudo cp nexus.service /etc/systemd/system/
+sudo cp nexus-dash.service /etc/systemd/system/
 ```
 
 ### 2. Reload systemd
@@ -31,15 +31,15 @@ sudo systemctl daemon-reload
 To start the services automatically at boot:
 
 ```bash
-sudo systemctl enable hblink4
-sudo systemctl enable hblink4-dash
+sudo systemctl enable nexus
+sudo systemctl enable nexus-dash
 ```
 
 ### 4. Start the services
 
 ```bash
-sudo systemctl start hblink4
-sudo systemctl start hblink4-dash
+sudo systemctl start nexus
+sudo systemctl start nexus-dash
 ```
 
 ## Service Management
@@ -47,49 +47,49 @@ sudo systemctl start hblink4-dash
 ### Check service status
 
 ```bash
-sudo systemctl status hblink4
-sudo systemctl status hblink4-dash
+sudo systemctl status nexus
+sudo systemctl status nexus-dash
 ```
 
 ### View logs
 
 ```bash
 # View logs for HBlink4
-sudo journalctl -u hblink4 -f
+sudo journalctl -u nexus -f
 
 # View logs for dashboard
-sudo journalctl -u hblink4-dash -f
+sudo journalctl -u nexus-dash -f
 
 # View last 100 lines
-sudo journalctl -u hblink4 -n 100
+sudo journalctl -u nexus -n 100
 ```
 
 ### Stop services
 
 ```bash
-sudo systemctl stop hblink4
-sudo systemctl stop hblink4-dash
+sudo systemctl stop nexus
+sudo systemctl stop nexus-dash
 ```
 
 ### Restart services
 
 ```bash
-sudo systemctl restart hblink4
-sudo systemctl restart hblink4-dash
+sudo systemctl restart nexus
+sudo systemctl restart nexus-dash
 ```
 
 ### Disable autostart
 
 ```bash
-sudo systemctl disable hblink4
-sudo systemctl disable hblink4-dash
+sudo systemctl disable nexus
+sudo systemctl disable nexus-dash
 ```
 
 ## Configuration
 
 The service files are configured to:
 - Run as user `cort` in group `cort`
-- Use the Python virtual environment at `/home/cort/hblink4/venv`
+- Use the Python virtual environment at `/home/cort/nexus/venv`
 - Automatically restart on failure (after 10 seconds)
 - Log to systemd journal (view with `journalctl`)
 - Start after network is available
@@ -99,7 +99,7 @@ The service files are configured to:
 
 If you need to modify the services (different user, paths, etc.), edit the files before copying them:
 
-1. Edit `hblink4.service` and/or `hblink4-dash.service`
+1. Edit `nexus.service` and/or `nexus-dash.service`
 2. Change `User=`, `Group=`, `WorkingDirectory=`, or `ExecStart=` as needed
 3. Copy to `/etc/systemd/system/`
 4. Run `sudo systemctl daemon-reload`
@@ -116,8 +116,8 @@ Both services include security hardening:
 
 Check the status and logs:
 ```bash
-sudo systemctl status hblink4
-sudo journalctl -u hblink4 -n 50
+sudo systemctl status nexus
+sudo journalctl -u nexus -n 50
 ```
 
 Common issues:
@@ -128,13 +128,13 @@ Common issues:
 
 ### Dashboard can't connect to HBlink4
 
-1. Ensure HBlink4 is running: `sudo systemctl status hblink4`
+1. Ensure HBlink4 is running: `sudo systemctl status nexus`
 2. Check dashboard config points to correct socket/host
-3. Check logs: `sudo journalctl -u hblink4-dash -n 50`
+3. Check logs: `sudo journalctl -u nexus-dash -n 50`
 
 ## Notes
 
-- The dashboard service has `Wants=hblink4.service`, so it will start after HBlink4
+- The dashboard service has `Wants=nexus.service`, so it will start after HBlink4
 - Both services have `Restart=always` for automatic recovery
 - Logs are sent to systemd journal, not file-based logging
 - Services run with the same privileges as the `cort` user

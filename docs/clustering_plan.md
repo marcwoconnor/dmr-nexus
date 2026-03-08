@@ -88,7 +88,7 @@ Each server gets a unique `node_id` (string, e.g., `"east-1"`, `"west-1"`) and a
 
 **Goal:** Servers know about each other and share connection state. No cross-server routing yet.
 
-### 1.1 New module: `hblink4/cluster.py`
+### 1.1 New module: `nexus/cluster.py`
 
 A `ClusterBus` class that manages peer connections:
 

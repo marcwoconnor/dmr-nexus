@@ -9,3 +9,7 @@ uvicorn[standard]>=0.24.0
 
 # WebSocket support (included in uvicorn[standard])
 websockets>=12.0
+
+# TG plan (shared with core server)
+asyncpg>=0.29.0
+bcrypt>=4.1.0

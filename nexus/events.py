@@ -25,7 +25,7 @@ class EventEmitter:
     def __init__(self, enabled: bool = True, transport: str = 'unix', 
                  host_ipv4: str = '127.0.0.1', host_ipv6: str = '::1',
                  port: int = 8765,
-                 unix_socket: str = '/tmp/hblink4.sock',
+                 unix_socket: str = '/tmp/nexus.sock',
                  disable_ipv6: bool = False,
                  buffer_size: int = 65536):
         """

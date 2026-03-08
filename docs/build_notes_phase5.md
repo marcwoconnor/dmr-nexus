@@ -45,14 +45,14 @@ Client                    Server
 #### New Files
 | File | Lines | Purpose |
 |------|-------|---------|
-| `hblink4/cluster_protocol.py` | ~200 | Token, TokenManager, wire format constants |
-| `hblink4/subscriptions.py` | ~160 | SubscriptionStore with config validation |
+| `nexus/cluster_protocol.py` | ~200 | Token, TokenManager, wire format constants |
+| `nexus/subscriptions.py` | ~160 | SubscriptionStore with config validation |
 | `tests/test_native_protocol.py` | ~240 | 29 tests for tokens and subscriptions |
 
 #### Modified Files
 | File | Changes |
 |------|---------|
-| `hblink4/hblink.py` | Imports, TokenManager+SubscriptionStore init, dual-protocol dispatch in datagram_received, 6 native packet handlers (auth/subscribe/ping/data/disconnect), subscription cluster message handlers, subscription broadcast wiring, subscription cleanup on peer disconnect |
+| `nexus/hblink.py` | Imports, TokenManager+SubscriptionStore init, dual-protocol dispatch in datagram_received, 6 native packet handlers (auth/subscribe/ping/data/disconnect), subscription cluster message handlers, subscription broadcast wiring, subscription cleanup on peer disconnect |
 
 ## Tests (29 new)
 - Token: roundtrip, expired, not expired, hash size, corrupt data, allow-all

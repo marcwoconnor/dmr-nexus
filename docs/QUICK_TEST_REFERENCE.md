@@ -4,7 +4,7 @@
 
 ### All tests
 ```bash
-cd /home/cort/hblink4
+cd /home/cort/nexus
 source venv/bin/activate
 python3 -m pytest tests/ -v
 ```
@@ -21,7 +21,7 @@ python3 -m pytest tests/test_routing_optimization.py::test_config_intersection -
 
 ### With coverage
 ```bash
-python3 -m pytest tests/ --cov=hblink4 --cov-report=html
+python3 -m pytest tests/ --cov=nexus --cov-report=html
 ```
 
 ---
@@ -76,7 +76,7 @@ python3 -m pytest tests/ --cov=hblink4 --cov-report=html
 
 ```bash
 # 1. Syntax check
-python3 -m py_compile hblink4/hblink.py
+python3 -m py_compile nexus/hblink.py
 
 # 2. Run all tests
 python3 -m pytest tests/ -v
@@ -115,7 +115,7 @@ RESULTS: 8 passed, 0 failed
 ### Import errors
 ```bash
 # Make sure you're in the right directory and venv is activated
-cd /home/cort/hblink4
+cd /home/cort/nexus
 source venv/bin/activate
 ```
 

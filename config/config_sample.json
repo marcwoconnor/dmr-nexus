@@ -72,6 +72,12 @@
             {"node_id": "gw-eu", "region_id": "eu", "address": "10.0.3.1", "port": 62033}
         ]
     },
+    "tg_plan": {
+        "_comment": "Centralized TG management via PostgreSQL. When enabled, repeater owners can manage TG assignments via REST API. Config patterns remain the security boundary.",
+        "enabled": false,
+        "database_url": "postgresql://nexus:password@10.31.11.x:5432/nexus",
+        "admin_token": "change-me-admin-token"
+    },
     "dashboard": {
         "enabled": true,
         "disable_ipv6": false,
@@ -79,7 +85,7 @@
         "host_ipv4": "127.0.0.1",
         "host_ipv6": "::1",
         "port": 8765,
-        "unix_socket": "/tmp/hblink4.sock",
+        "unix_socket": "/tmp/nexus.sock",
         "buffer_size": 65536
     },
     "blacklist": {

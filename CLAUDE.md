@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-DMR Nexus is a distributed DMR (Digital Mobile Radio) network platform. Built on the HBlink foundation by Cort Buffington (N0MJS), it has been extensively extended with multi-server clustering, a cluster-native client protocol, inter-region backbone routing, and global-scale hierarchical forwarding. Three main components: the core asyncio UDP server (`hblink4/`), a FastAPI real-time web dashboard (`dashboard/`), and a management CLI (`hbctl.py`).
+DMR Nexus is a distributed DMR (Digital Mobile Radio) network platform. Built on the HBlink foundation by Cort Buffington (N0MJS), it has been extensively extended with multi-server clustering, a cluster-native client protocol, inter-region backbone routing, and global-scale hierarchical forwarding. Three main components: the core asyncio UDP server (`nexus/`), a FastAPI real-time web dashboard (`dashboard/`), and a management CLI (`hbctl.py`).
 
 ## Commands
 
@@ -27,7 +27,7 @@ python3 -m pytest tests/test_access_control.py::TestRepeaterMatcher::test_specif
 
 ## Architecture
 
-### Core Server (`hblink4/`)
+### Core Server (`nexus/`)
 - **`hblink.py`** (~4,100 lines): Central hub. `HBProtocol` is the asyncio UDP protocol handler managing inbound repeaters, outbound connections, cluster bus, backbone bus, native client protocol, management socket, and stream routing. All integration lives here.
 - **`cluster.py`** (~640 lines): `ClusterBus` — TCP full-mesh for intra-region clustering. HMAC-SHA256 auth, heartbeats, dead peer detection, auto-reconnect, connection dedup (lower node_id wins).
 - **`backbone.py`** (~900 lines): `BackboneBus` — gateway-only TCP mesh for inter-region routing. `TalkgroupRoutingTable` tracks which regions subscribe to which TGs. `UserLookupService` handles cross-region private call lookups with positive/negative caching.

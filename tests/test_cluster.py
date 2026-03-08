@@ -11,15 +11,15 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from hblink4.cluster import (
+from nexus.cluster import (
     ClusterBus, PeerState, FRAME_HEADER,
     MSG_TYPE_JSON, MSG_TYPE_STREAM_DATA, MSG_TYPE_STREAM_END,
     AUTH_CHALLENGE, AUTH_RESPONSE, AUTH_OK
 )
-from hblink4.models import StreamState, RepeaterState
-from hblink4.subscriptions import SubscriptionStore
-from hblink4.user_cache import UserCache
-from hblink4.backbone import UserLookupService
+from nexus.models import StreamState, RepeaterState
+from nexus.subscriptions import SubscriptionStore
+from nexus.user_cache import UserCache
+from nexus.backbone import UserLookupService
 
 
 class TestPeerState(unittest.TestCase):
@@ -253,7 +253,7 @@ def _make_hbprotocol_for_routing():
     We can't easily instantiate HBProtocol (needs a running event loop, transport, etc.)
     so we import the class and create a mock that has the real method bound to it.
     """
-    from hblink4.hblink import HBProtocol, CONFIG
+    from nexus.hblink import HBProtocol, CONFIG
 
     # Set minimal CONFIG
     CONFIG.clear()
@@ -772,7 +772,7 @@ class TestVirtualStreamTimeout(unittest.TestCase):
         self.local_rid = rid
 
         # Bind _check_stream_timeouts and dependencies
-        from hblink4.hblink import HBProtocol
+        from nexus.hblink import HBProtocol
         self.proto._check_stream_timeouts = HBProtocol._check_stream_timeouts.__get__(self.proto)
         self.proto._check_slot_timeout = HBProtocol._check_slot_timeout.__get__(self.proto)
         self.proto._check_outbound_slot_timeout = HBProtocol._check_outbound_slot_timeout.__get__(self.proto)
@@ -816,7 +816,7 @@ class TestGracefulShutdown(unittest.IsolatedAsyncioTestCase):
 
     async def test_shutdown_broadcasts_draining_and_down(self):
         """graceful_shutdown broadcasts node_draining then node_down."""
-        from hblink4.hblink import HBProtocol, CONFIG
+        from nexus.hblink import HBProtocol, CONFIG
         CONFIG.clear()
         CONFIG.update({
             'global': {'bind_address': '0.0.0.0', 'port': 62030,
@@ -843,6 +843,8 @@ class TestGracefulShutdown(unittest.IsolatedAsyncioTestCase):
         mock._port = None
         mock._events = MagicMock()
         mock._backbone_bus = None
+        mock._topology_manager = MagicMock()
+        mock._native_clients = {}
 
         # Bind real methods
         mock.graceful_shutdown = HBProtocol.graceful_shutdown.__get__(mock)
@@ -871,7 +873,7 @@ class TestNodeDrainingHandler(unittest.TestCase):
 
     def test_node_draining_adds_to_set(self):
         """node_draining message adds peer to draining set."""
-        from hblink4.hblink import HBProtocol
+        from nexus.hblink import HBProtocol
         self.proto._handle_cluster_message = HBProtocol._handle_cluster_message.__get__(self.proto)
         # Can't easily call async from sync test, so test the logic directly
         self.proto._draining_peers.add('node-b')
@@ -899,7 +901,7 @@ class TestUserCacheSharing(unittest.TestCase):
 
     def test_source_node_on_entry(self):
         """UserEntry tracks source_node."""
-        from hblink4.user_cache import UserCache
+        from nexus.user_cache import UserCache
         cache = UserCache(timeout_seconds=60)
         cache.update(12345, 312000, 'W1AW', 1, 9, source_node='node-b')
         entry = cache.lookup(12345)
@@ -908,7 +910,7 @@ class TestUserCacheSharing(unittest.TestCase):
 
     def test_local_entry_no_source_node(self):
         """Local entries have source_node=None."""
-        from hblink4.user_cache import UserCache
+        from nexus.user_cache import UserCache
         cache = UserCache(timeout_seconds=60)
         cache.update(12345, 312000, 'W1AW', 1, 9)
         entry = cache.lookup(12345)
@@ -916,7 +918,7 @@ class TestUserCacheSharing(unittest.TestCase):
 
     def test_broadcast_queued_on_local_update(self):
         """Local update queues a broadcast entry."""
-        from hblink4.user_cache import UserCache
+        from nexus.user_cache import UserCache
         cache = UserCache(timeout_seconds=60)
         broadcasts = []
         cache.set_broadcast_callback(lambda batch: broadcasts.extend(batch))
@@ -927,7 +929,7 @@ class TestUserCacheSharing(unittest.TestCase):
 
     def test_broadcast_not_queued_for_remote(self):
         """Remote entries don't queue a broadcast (no re-broadcast)."""
-        from hblink4.user_cache import UserCache
+        from nexus.user_cache import UserCache
         cache = UserCache(timeout_seconds=60)
         broadcasts = []
         cache.set_broadcast_callback(lambda batch: broadcasts.extend(batch))
@@ -936,7 +938,7 @@ class TestUserCacheSharing(unittest.TestCase):
 
     def test_flush_broadcast(self):
         """flush_broadcast sends queued entries via callback."""
-        from hblink4.user_cache import UserCache
+        from nexus.user_cache import UserCache
         cache = UserCache(timeout_seconds=60)
         batches = []
         cache.set_broadcast_callback(lambda batch: batches.append(batch))
@@ -951,7 +953,7 @@ class TestUserCacheSharing(unittest.TestCase):
 
     def test_flush_throttled(self):
         """flush_broadcast respects throttle interval."""
-        from hblink4.user_cache import UserCache
+        from nexus.user_cache import UserCache
         cache = UserCache(timeout_seconds=60)
         batches = []
         cache.set_broadcast_callback(lambda batch: batches.append(batch))
@@ -964,7 +966,7 @@ class TestUserCacheSharing(unittest.TestCase):
 
     def test_batch_overflow_forces_flush(self):
         """Exceeding batch max forces immediate flush."""
-        from hblink4.user_cache import UserCache, _BATCH_MAX
+        from nexus.user_cache import UserCache, _BATCH_MAX
         cache = UserCache(timeout_seconds=60)
         batches = []
         cache.set_broadcast_callback(lambda batch: batches.append(batch))
@@ -978,7 +980,7 @@ class TestUserCacheSharing(unittest.TestCase):
 
     def test_merge_remote(self):
         """merge_remote adds entries with source_node set."""
-        from hblink4.user_cache import UserCache
+        from nexus.user_cache import UserCache
         cache = UserCache(timeout_seconds=60)
         cache.merge_remote([
             {'radio_id': 11111, 'repeater_id': 312000, 'slot': 1, 'talkgroup': 9},
@@ -992,7 +994,7 @@ class TestUserCacheSharing(unittest.TestCase):
 
     def test_local_overwrites_remote(self):
         """Local update overwrites remote entry (local is more authoritative)."""
-        from hblink4.user_cache import UserCache
+        from nexus.user_cache import UserCache
         cache = UserCache(timeout_seconds=60)
         cache.update(12345, 312000, '', 1, 9, source_node='node-b')
         self.assertEqual(cache.lookup(12345).source_node, 'node-b')
@@ -1003,7 +1005,7 @@ class TestUserCacheSharing(unittest.TestCase):
 
     def test_cleanup_flushes_broadcast(self):
         """cleanup() also flushes the broadcast queue."""
-        from hblink4.user_cache import UserCache
+        from nexus.user_cache import UserCache
         cache = UserCache(timeout_seconds=60)
         batches = []
         cache.set_broadcast_callback(lambda batch: batches.append(batch))
@@ -1014,7 +1016,7 @@ class TestUserCacheSharing(unittest.TestCase):
 
     def test_to_dict_includes_source_node(self):
         """to_dict includes source_node for remote entries."""
-        from hblink4.user_cache import UserEntry
+        from nexus.user_cache import UserEntry
         entry = UserEntry(radio_id=1, repeater_id=2, callsign='', slot=1,
                           talkgroup=9, source_node='node-b')
         d = entry.to_dict()
@@ -1022,7 +1024,7 @@ class TestUserCacheSharing(unittest.TestCase):
 
     def test_to_dict_omits_source_node_for_local(self):
         """to_dict omits source_node for local entries."""
-        from hblink4.user_cache import UserEntry
+        from nexus.user_cache import UserEntry
         entry = UserEntry(radio_id=1, repeater_id=2, callsign='', slot=1, talkgroup=9)
         d = entry.to_dict()
         self.assertNotIn('source_node', d)
@@ -1032,7 +1034,7 @@ class TestClusterDashboardEmit(unittest.TestCase):
     """Phase 1.4: _emit_cluster_state emits correct data to EventEmitter."""
 
     def _make_proto(self):
-        from hblink4.hblink import HBProtocol
+        from nexus.hblink import HBProtocol
         proto = _make_hbprotocol_for_routing()
         proto._events = MagicMock()
         proto._cluster_bus._node_id = 'node-a'
@@ -1147,8 +1149,8 @@ class TestConfigReload(unittest.TestCase):
     """Phase 4.1: Config hot-reload via _reload_config."""
 
     def _make_proto(self):
-        from hblink4.hblink import HBProtocol, CONFIG
-        from hblink4.access_control import RepeaterMatcher
+        from nexus.hblink import HBProtocol, CONFIG
+        from nexus.access_control import RepeaterMatcher
         proto = _make_hbprotocol_for_routing()
         proto._events = MagicMock()
         proto._config_file = None
@@ -1169,7 +1171,7 @@ class TestConfigReload(unittest.TestCase):
     def test_reload_rebuilds_matcher(self):
         """Reload replaces the RepeaterMatcher."""
         import tempfile
-        from hblink4.hblink import CONFIG
+        from nexus.hblink import CONFIG
         # Write a temporary config
         cfg = dict(CONFIG)
         cfg['repeater_configurations'] = {'patterns': []}
@@ -1189,8 +1191,8 @@ class TestConfigReload(unittest.TestCase):
     def test_reload_disconnects_blacklisted(self):
         """Repeater now on blacklist gets disconnected."""
         import tempfile
-        from hblink4.hblink import CONFIG
-        from hblink4.models import RepeaterState
+        from nexus.hblink import CONFIG
+        from nexus.models import RepeaterState
 
         # Create a connected repeater
         proto = self._make_proto()
@@ -1228,7 +1230,7 @@ class TestConfigReload(unittest.TestCase):
     def test_reload_emits_dashboard_event(self):
         """Reload emits config_reloaded event."""
         import tempfile
-        from hblink4.hblink import CONFIG
+        from nexus.hblink import CONFIG
 
         cfg = dict(CONFIG)
         cfg['repeater_configurations'] = {'patterns': []}
@@ -1292,7 +1294,7 @@ class TestHomebrewProxySubscription(unittest.TestCase):
     """HomeBrew repeaters get internal subscriptions via proxy adapter."""
 
     def _make_proto(self):
-        from hblink4.hblink import HBProtocol, CONFIG, rid_to_int
+        from nexus.hblink import HBProtocol, CONFIG, rid_to_int
         CONFIG.clear()
         CONFIG.update({
             'global': {
@@ -1463,7 +1465,7 @@ class TestNativeClientForwarding(unittest.TestCase):
     """Native client packet formatting in _forward_stream."""
 
     def _make_proto(self):
-        from hblink4.hblink import HBProtocol, CONFIG
+        from nexus.hblink import HBProtocol, CONFIG
         CONFIG.clear()
         CONFIG.update({
             'global': {
@@ -1493,7 +1495,7 @@ class TestNativeClientForwarding(unittest.TestCase):
 
     def test_native_forward_packet_format(self):
         """Native forwarding wraps DMRD payload in CLNT+DATA+token_hash."""
-        from hblink4.cluster_protocol import NATIVE_MAGIC, CMD_DATA
+        from nexus.cluster_protocol import NATIVE_MAGIC, CMD_DATA
         proto = self._make_proto()
 
         # Build a DMRD packet with valid frame type byte at offset 15
@@ -1539,8 +1541,8 @@ class TestClusterAwarePong(unittest.TestCase):
     """PONG response includes cluster health, peer status, and preferred_server."""
 
     def _make_proto(self):
-        from hblink4.hblink import HBProtocol, CONFIG
-        from hblink4.cluster_protocol import TokenManager
+        from nexus.hblink import HBProtocol, CONFIG
+        from nexus.cluster_protocol import TokenManager
         CONFIG.clear()
         CONFIG.update({
             'global': {
@@ -1572,7 +1574,7 @@ class TestClusterAwarePong(unittest.TestCase):
 
     def _send_ping(self, proto, tm, addr=('10.0.0.5', 50000)):
         """Issue a token, register client, send ping, return parsed PONG health."""
-        from hblink4.cluster_protocol import NATIVE_MAGIC, CMD_PING
+        from nexus.cluster_protocol import NATIVE_MAGIC, CMD_PING
         token = tm.issue_token(312000, [8], [3120])
         proto._native_clients[addr] = {
             'token_hash': token.token_hash,
@@ -1692,7 +1694,7 @@ class TestBackboneTargetCalculation(unittest.TestCase):
 
     def test_backbone_target_when_region_has_tg(self):
         """Remote region with matching TG appears as backbone target."""
-        from hblink4.backbone import BackboneBus, TalkgroupRoutingTable
+        from nexus.backbone import BackboneBus, TalkgroupRoutingTable
         bb = MagicMock()
         bb.tg_table = TalkgroupRoutingTable()
         bb.tg_table.update_region('us-west', {8, 9}, {3120})
@@ -1706,7 +1708,7 @@ class TestBackboneTargetCalculation(unittest.TestCase):
 
     def test_no_backbone_target_wrong_tg(self):
         """Remote region without matching TG not targeted."""
-        from hblink4.backbone import BackboneBus, TalkgroupRoutingTable
+        from nexus.backbone import BackboneBus, TalkgroupRoutingTable
         bb = MagicMock()
         bb.tg_table = TalkgroupRoutingTable()
         bb.tg_table.update_region('us-west', {8, 9}, {3120})
@@ -1720,7 +1722,7 @@ class TestBackboneTargetCalculation(unittest.TestCase):
 
     def test_own_region_excluded(self):
         """Own region excluded from backbone targets."""
-        from hblink4.backbone import BackboneBus, TalkgroupRoutingTable
+        from nexus.backbone import BackboneBus, TalkgroupRoutingTable
         bb = MagicMock()
         bb.tg_table = TalkgroupRoutingTable()
         bb.tg_table.update_region('us-east', {8}, set())
@@ -1736,7 +1738,7 @@ class TestBackboneTargetCalculation(unittest.TestCase):
 
     def test_no_backbone_when_local_only(self):
         """local_only=True excludes backbone targets."""
-        from hblink4.backbone import BackboneBus, TalkgroupRoutingTable
+        from nexus.backbone import BackboneBus, TalkgroupRoutingTable
         bb = MagicMock()
         bb.tg_table = TalkgroupRoutingTable()
         bb.tg_table.update_region('us-west', {8}, set())
@@ -1881,7 +1883,7 @@ class TestMultiConnectDedup(unittest.TestCase):
 
 def _make_hbprotocol_for_private_call():
     """Create HBProtocol mock for testing private call routing in _handle_stream_start."""
-    from hblink4.hblink import HBProtocol, CONFIG
+    from nexus.hblink import HBProtocol, CONFIG
 
     CONFIG.clear()
     CONFIG.update({
@@ -1962,7 +1964,7 @@ class TestPrivateCallRouting(unittest.TestCase):
         self.proto._repeaters[self.SRC_RPT_BYTES] = src_rpt
 
         # Patch asyncio.ensure_future (no event loop in sync tests)
-        self._ef_patcher = patch('hblink4.hblink.asyncio.ensure_future')
+        self._ef_patcher = patch('nexus.hblink.asyncio.ensure_future')
         self._ef_patcher.start()
 
     def tearDown(self):

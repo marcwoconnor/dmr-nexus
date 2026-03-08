@@ -74,7 +74,7 @@ def load_config() -> dict:
             "transport": "unix",
             "host": "127.0.0.1",
             "port": 8765,
-            "unix_socket": "/tmp/hblink4.sock",
+            "unix_socket": "/tmp/nexus.sock",
             "ipv6": False,
             "buffer_size": 65536
         }
@@ -383,7 +383,7 @@ async def broadcast_hblink_status(connected: bool):
 
 
 class TCPProtocol(asyncio.Protocol):
-    """TCP protocol handler for receiving events from hblink4"""
+    """TCP protocol handler for receiving events from nexus"""
     
     def __init__(self, callback):
         self.callback = callback
@@ -454,7 +454,7 @@ class TCPProtocol(asyncio.Protocol):
 
 
 class UnixProtocol(asyncio.Protocol):
-    """Unix socket protocol handler for receiving events from hblink4"""
+    """Unix socket protocol handler for receiving events from nexus"""
     
     def __init__(self, callback):
         self.callback = callback
@@ -524,10 +524,10 @@ class UnixProtocol(asyncio.Protocol):
 
 
 class EventReceiver:
-    """Receives events from hblink4 via TCP or Unix socket"""
+    """Receives events from nexus via TCP or Unix socket"""
     
     def __init__(self, transport='unix', host_ipv4='127.0.0.1', host_ipv6='::1',
-                 port=8765, unix_socket='/tmp/hblink4.sock', disable_ipv6=False):
+                 port=8765, unix_socket='/tmp/nexus.sock', disable_ipv6=False):
         """
         Initialize event receiver with transport abstraction
         
@@ -552,7 +552,7 @@ class EventReceiver:
         self.server_v6 = None
     
     async def start(self):
-        """Start receiving events from hblink4"""
+        """Start receiving events from nexus"""
         loop = asyncio.get_event_loop()
         
         if self.transport == 'tcp':
@@ -613,7 +613,7 @@ class EventReceiver:
         logger.info(f"📡 Listening for HBlink4 events via Unix socket at {self.unix_socket}")
     
     async def process_event(self, data: bytes):
-        """Process incoming event from hblink4"""
+        """Process incoming event from nexus"""
         try:
             event = json.loads(data.decode('utf-8'))
             await self.handle_event(event)
@@ -962,7 +962,7 @@ async def get_repeater_details(repeater_id: int):
             # Import here to avoid circular dependencies
             import sys
             sys.path.insert(0, str(Path(__file__).parent.parent))
-            from hblink4.access_control import RepeaterMatcher
+            from nexus.access_control import RepeaterMatcher
             
             matcher = RepeaterMatcher(config)
             pattern = matcher.get_pattern_for_repeater(repeater_id, repeater.get('callsign'))
@@ -1121,11 +1121,29 @@ async def startup_event():
         host_ipv4=receiver_config.get('host_ipv4', '127.0.0.1'),
         host_ipv6=receiver_config.get('host_ipv6', '::1'),
         port=receiver_config.get('port', 8765),
-        unix_socket=receiver_config.get('unix_socket', '/tmp/hblink4.sock'),
+        unix_socket=receiver_config.get('unix_socket', '/tmp/nexus.sock'),
         disable_ipv6=receiver_config.get('disable_ipv6', False)
     )
     asyncio.create_task(receiver.start())
     asyncio.create_task(midnight_reset_task())
+
+    # Mount TG plan API if configured
+    tg_plan_config = dashboard_config.get('tg_plan', {})
+    if tg_plan_config.get('enabled', False):
+        try:
+            import sys
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from nexus.tg_plan import TGPlanStore
+            from dashboard.tg_plan_api import mount_tg_plan_api
+
+            store = TGPlanStore(tg_plan_config['database_url'])
+            await store.start()
+            mount_tg_plan_api(app, store, tg_plan_config.get('admin_token', ''))
+            state.tg_plan_store = store
+            logger.info('TG plan API enabled')
+        except Exception as e:
+            logger.warning(f'TG plan API failed to start: {e} (non-fatal)')
+
     logger.info("🚀 HBlink4 Dashboard started!")
     logger.info(f"📡 Event transport: {receiver_config.get('transport', 'unix').upper()}")
     logger.info("📊 Access dashboard at http://localhost:8080")
@@ -1136,6 +1154,8 @@ async def shutdown_event():
     """Clean shutdown - save data"""
     logger.info("💾 Dashboard shutting down, saving data...")
     save_persistent_data()
+    if hasattr(state, 'tg_plan_store') and state.tg_plan_store:
+        await state.tg_plan_store.stop()
     logger.info("✅ Dashboard shutdown complete")
 
 

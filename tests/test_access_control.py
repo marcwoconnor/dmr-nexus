@@ -6,7 +6,7 @@ when config_sample.json changes.
 """
 
 import unittest
-from hblink4.access_control import (
+from nexus.access_control import (
     RepeaterMatcher, RepeaterConfig, InvalidPatternError, BlacklistError
 )
 
