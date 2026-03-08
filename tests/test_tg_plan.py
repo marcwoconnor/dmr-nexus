@@ -363,7 +363,8 @@ class TestHealthCheck:
     async def test_healthy(self):
         pool, conn = _mock_pool()
         store = _make_store(pool)
-        conn.fetchval.return_value = 1
+        mock_row = {'host': '10.31.11.49', 'is_standby': False}
+        conn.fetchrow.return_value = mock_row
 
         ok, latency = await store.health_check()
         assert ok is True
@@ -371,10 +372,21 @@ class TestHealthCheck:
         assert latency >= 0
 
     @pytest.mark.asyncio
+    async def test_healthy_reports_ha_status(self):
+        pool, conn = _mock_pool()
+        store = _make_store(pool)
+        mock_row = {'host': '10.31.11.49', 'is_standby': False}
+        conn.fetchrow.return_value = mock_row
+
+        await store.health_check()
+        assert store._pg_host == '10.31.11.49'
+        assert store._pg_is_standby is False
+
+    @pytest.mark.asyncio
     async def test_unhealthy(self):
         pool, conn = _mock_pool()
         store = _make_store(pool)
-        conn.fetchval.side_effect = Exception('connection lost')
+        conn.fetchrow.side_effect = Exception('connection lost')
 
         ok, latency = await store.health_check()
         assert ok is False
@@ -428,3 +440,93 @@ class TestProperties:
     def test_pg_latency_none_initially(self):
         store = _make_store()
         assert store.pg_latency_ms is None
+
+    def test_pg_status_defaults(self):
+        store = _make_store()
+        status = store.pg_status
+        assert status['connected'] is False
+        assert status['host'] is None
+        assert status['is_standby'] is None
+        assert status['latency_ms'] is None
+        assert status['listen_alive'] is False
+
+    def test_pg_status_with_listen_conn(self):
+        pool, _ = _mock_pool()
+        store = _make_store(pool)
+        mock_conn = MagicMock()
+        mock_conn.is_closed.return_value = False
+        store._listen_conn = mock_conn
+        assert store.pg_status['listen_alive'] is True
+
+    def test_pg_status_with_closed_listen_conn(self):
+        pool, _ = _mock_pool()
+        store = _make_store(pool)
+        mock_conn = MagicMock()
+        mock_conn.is_closed.return_value = True
+        store._listen_conn = mock_conn
+        assert store.pg_status['listen_alive'] is False
+
+
+# ── LISTEN reconnect ─────────────────────────────
+
+class TestListenReconnect:
+    def test_on_listen_terminated_schedules_reconnect(self):
+        """Termination handler should schedule reconnect when started."""
+        store = _make_store()
+        store._started = True
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            store._on_listen_terminated(None)
+            assert store._listen_conn is None
+        finally:
+            loop.close()
+
+    def test_on_listen_terminated_noop_when_stopped(self):
+        """Termination handler should not reconnect when stopped."""
+        store = _make_store()
+        store._started = False
+
+        # Should not raise even without event loop
+        store._on_listen_terminated(None)
+        assert store._listen_conn is None
+
+    @pytest.mark.asyncio
+    async def test_reconnect_listen_retries(self):
+        """Reconnect loop should retry on failure then succeed."""
+        store = _make_store()
+        store._started = True
+        store._listen_reconnect_delay = 0.01  # fast for tests
+
+        call_count = 0
+        async def mock_connect_listen():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionError('PG not ready')
+            # Success on 3rd try
+            store._listen_conn = MagicMock()
+
+        store._connect_listen = mock_connect_listen
+        await store._reconnect_listen()
+        assert call_count == 3
+        assert store._listen_conn is not None
+
+    @pytest.mark.asyncio
+    async def test_reconnect_listen_stops_when_stopped(self):
+        """Reconnect loop should exit if store is stopped."""
+        store = _make_store()
+        store._started = True
+        store._listen_reconnect_delay = 0.01
+
+        call_count = 0
+        async def mock_connect_listen():
+            nonlocal call_count
+            call_count += 1
+            store._started = False  # simulate stop() during reconnect
+            raise ConnectionError('PG down')
+
+        store._connect_listen = mock_connect_listen
+        await store._reconnect_listen()
+        assert call_count == 1

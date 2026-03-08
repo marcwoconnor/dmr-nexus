@@ -56,7 +56,7 @@
     },
     "tg_plan": {
         "enabled": true,
-        "database_url": "postgresql://nexus:3MweroZsCmAyYu5kyGocr4I755J2-LfO@10.31.11.49:5432/nexus",
+        "database_url": "postgresql://nexus:3MweroZsCmAyYu5kyGocr4I755J2-LfO@10.31.11.49,10.31.11.48:5432/nexus?target_session_attrs=read-write",
         "admin_token": "S9hSkqFagmZriCB3OQiJy64zDRVs8v-W5hF8ZRmtklw"
     },
     "dashboard": {

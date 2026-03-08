@@ -15,7 +15,7 @@
     "max_events": 50,
     "tg_plan": {
         "enabled": false,
-        "database_url": "postgresql://nexus:password@10.31.11.x:5432/nexus",
+        "database_url": "postgresql://nexus:password@primary-host,standby-host:5432/nexus?target_session_attrs=read-write",
         "admin_token": "change-me-admin-token"
     },
     "event_receiver": {

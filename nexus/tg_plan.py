@@ -52,7 +52,8 @@ class TGPlanStore:
                  on_change: Optional[Callable[[int], Awaitable[None]]] = None):
         """
         Args:
-            database_url: PostgreSQL connection string
+            database_url: PostgreSQL connection string (supports multi-host
+                for HA, e.g. host1,host2 with target_session_attrs=primary)
             on_change: async callback(repeater_id) fired on LISTEN notification
         """
         self._dsn = database_url
@@ -61,6 +62,9 @@ class TGPlanStore:
         self._on_change = on_change
         self._started = False
         self._pg_latency_ms: Optional[float] = None
+        self._pg_host: Optional[str] = None
+        self._pg_is_standby: Optional[bool] = None
+        self._listen_reconnect_delay = 5
 
     @property
     def connected(self) -> bool:
@@ -87,19 +91,51 @@ class TGPlanStore:
             await conn.execute(_SCHEMA_SQL)
         logger.info('TG plan: schema verified')
 
-        # Dedicated connection for LISTEN
+        await self._connect_listen()
+        self._started = True
+
+    async def _connect_listen(self):
+        """Establish dedicated LISTEN connection with termination handler."""
         self._listen_conn = await asyncpg.connect(self._dsn)
+        self._listen_conn.add_termination_listener(self._on_listen_terminated)
         await self._listen_conn.add_listener('tg_plan_changed', self._pg_notify)
         logger.info('TG plan: LISTEN tg_plan_changed active')
 
-        self._started = True
+    def _on_listen_terminated(self, conn):
+        """Called when LISTEN connection drops (PG failover, network issue)."""
+        logger.warning('TG plan: LISTEN connection lost, scheduling reconnect')
+        self._listen_conn = None
+        if self._started:
+            try:
+                loop = asyncio.get_event_loop()
+                loop.create_task(self._reconnect_listen())
+            except RuntimeError:
+                pass
+
+    async def _reconnect_listen(self):
+        """Retry LISTEN connection until success (handles PG failover)."""
+        while self._started:
+            try:
+                await asyncio.sleep(self._listen_reconnect_delay)
+                if not self._started:
+                    return
+                await self._connect_listen()
+                logger.info('TG plan: LISTEN reconnected after failover')
+                return
+            except Exception as e:
+                logger.warning(f'TG plan: LISTEN reconnect failed ({e}), '
+                               f'retrying in {self._listen_reconnect_delay}s')
 
     async def stop(self):
         """Disconnect from PG."""
         self._started = False
         if self._listen_conn:
-            await self._listen_conn.remove_listener('tg_plan_changed', self._pg_notify)
-            await self._listen_conn.close()
+            try:
+                self._listen_conn.remove_termination_listener(self._on_listen_terminated)
+                await self._listen_conn.remove_listener('tg_plan_changed', self._pg_notify)
+                await self._listen_conn.close()
+            except Exception:
+                pass
             self._listen_conn = None
         if self._pool:
             await self._pool.close()
@@ -117,19 +153,37 @@ class TGPlanStore:
             logger.warning(f'TG plan: bad NOTIFY payload: {e}')
 
     async def health_check(self) -> Tuple[bool, Optional[float]]:
-        """Check PG connectivity and measure latency."""
+        """Check PG connectivity, latency, and HA status."""
         if not self._pool:
             return False, None
         try:
             t0 = time.monotonic()
             async with self._pool.acquire() as conn:
-                await conn.fetchval('SELECT 1')
+                row = await conn.fetchrow(
+                    "SELECT inet_server_addr()::text AS host, "
+                    "pg_is_in_recovery() AS is_standby"
+                )
             ms = (time.monotonic() - t0) * 1000
             self._pg_latency_ms = round(ms, 1)
+            self._pg_host = row['host'] if row else None
+            self._pg_is_standby = row['is_standby'] if row else None
             return True, self._pg_latency_ms
         except Exception:
             self._pg_latency_ms = None
             return False, None
+
+    @property
+    def pg_status(self) -> dict:
+        """PG HA status for monitoring."""
+        return {
+            'connected': self.connected,
+            'host': self._pg_host,
+            'is_standby': self._pg_is_standby,
+            'latency_ms': self._pg_latency_ms,
+            'listen_alive': (self._listen_conn is not None
+                             and not getattr(self._listen_conn, 'is_closed',
+                                             lambda: True)()),
+        }
 
     # ── owner CRUD ─────────────────────────────────────
 

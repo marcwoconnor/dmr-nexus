@@ -73,9 +73,9 @@
         ]
     },
     "tg_plan": {
-        "_comment": "Centralized TG management via PostgreSQL. When enabled, repeater owners can manage TG assignments via REST API. Config patterns remain the security boundary.",
+        "_comment": "Centralized TG management via PostgreSQL. Multi-host DSN with target_session_attrs=read-write for automatic HA failover.",
         "enabled": false,
-        "database_url": "postgresql://nexus:password@10.31.11.x:5432/nexus",
+        "database_url": "postgresql://nexus:password@primary-host,standby-host:5432/nexus?target_session_attrs=read-write",
         "admin_token": "change-me-admin-token"
     },
     "dashboard": {

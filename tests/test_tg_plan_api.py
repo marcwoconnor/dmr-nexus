@@ -266,12 +266,19 @@ class TestHealth:
     def test_health_ok(self):
         app, store = _make_app()
         store.health_check.return_value = (True, 1.5)
+        # pg_status is a property (not async) — set as plain dict
+        type(store).pg_status = property(lambda self: {
+            'connected': True, 'host': '10.31.11.49',
+            'is_standby': False, 'latency_ms': 1.5, 'listen_alive': True,
+        })
         client = TestClient(app)
         r = client.get('/api/tg-plan/health')
         assert r.status_code == 200
         data = r.json()
         assert data['ok'] is True
         assert data['pg_latency_ms'] == 1.5
+        assert data['host'] == '10.31.11.49'
+        assert data['listen_alive'] is True
 
     def test_health_down(self):
         app, store = _make_app()

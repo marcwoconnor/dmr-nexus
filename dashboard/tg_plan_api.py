@@ -214,11 +214,14 @@ async def get_tg_repeaters(tg_id: int, _owner: str = Depends(get_current_owner))
 
 @router.get("/health")
 async def tg_plan_health():
-    """TG plan PG health check (no auth required)."""
+    """TG plan PG health check with HA status (no auth required)."""
     if not _store:
         return {"ok": False, "error": "TG plan not configured"}
     ok, latency = await _store.health_check()
-    return {"ok": ok, "pg_latency_ms": latency}
+    result = {"ok": ok, "pg_latency_ms": latency}
+    if ok:
+        result.update(_store.pg_status)
+    return result
 
 
 # ── mount helper ───────────────────────────────────
